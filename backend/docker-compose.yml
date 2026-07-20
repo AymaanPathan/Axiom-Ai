@@ -1,0 +1,26 @@
+services:
+  mongodb:
+    image: mongo:8
+    container_name: axiom-mongodb
+    restart: unless-stopped
+
+    ports:
+      - "27017:27017"
+
+    volumes:
+      - mongodb_data:/data/db
+
+  redis:
+    image: redis:8
+    container_name: axiom-redis
+    restart: unless-stopped
+
+    ports:
+      - "6379:6379"
+
+    volumes:
+      - redis_data:/data
+
+volumes:
+  mongodb_data:
+  redis_data:
