@@ -114,10 +114,11 @@ export default function RepoDetail() {
               </span>
             </div>
             <div className="flex flex-col divide-y divide-[#161718]">
-              {repo.routes.map((route) => (
-                <div
+              {repo.routes.map((route, index) => (
+                <Link
                   key={`${route.method}-${route.routePath}-${route.line}`}
-                  className="flex items-center gap-4 px-5 py-3"
+                  to={`/workspace/repos/${repositoryId}/endpoints/${index}`}
+                  className="flex items-center gap-4 px-5 py-3 transition-colors hover:bg-white/[0.02]"
                   style={{
                     fontFamily: "'Berkeley Mono', ui-monospace, monospace",
                   }}
@@ -135,7 +136,7 @@ export default function RepoDetail() {
                   <span className="ml-auto shrink-0 text-[11px] text-[#4c4f54]">
                     {route.file}:{route.line}
                   </span>
-                </div>
+                </Link>
               ))}
             </div>
           </div>

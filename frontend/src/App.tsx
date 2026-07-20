@@ -3,6 +3,7 @@ import Landing from "./pages/landing.page";
 import Workspace from "./pages/Workspace.page";
 import RepositoriesPage from "./pages/Repository.page";
 import RepoDetail from "./pages/RepoDetail";
+import ApiWorkspace from "./pages/ApiWorkSpace";
 import RequireAuth from "./routes/RequireAuth";
 
 export default function App() {
@@ -20,6 +21,10 @@ export default function App() {
         >
           <Route index element={<RepositoriesPage />} />
           <Route path="repos/:repositoryId" element={<RepoDetail />} />
+          <Route
+            path="repos/:repositoryId/endpoints/:routeIndex"
+            element={<ApiWorkspace />}
+          />
         </Route>
       </Routes>
     </BrowserRouter>
