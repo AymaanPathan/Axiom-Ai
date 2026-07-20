@@ -20,7 +20,7 @@ const MAX_HOPS = 2; // route -> controller -> one further hop (service/model)
 const MAX_FILE_CHARS = 4000;
 const ROUTE_CONTEXT_LINES = 10;
 
-async function resolveModulePath(
+export async function resolveModulePath(
   fromFile: string,
   specifier: string,
 ): Promise<string | null> {
@@ -45,22 +45,47 @@ async function resolveModulePath(
 }
 
 // Matches `import { a, b as c } from "./x"`, `import Default from "./x"`,
-// and combinations of the two. Only captures relative specifiers — local
-// files are what we can walk into; npm packages are a dead end here.
-function extractRelativeImports(
+// `import Default, { a, b } from "./x"`, and namespace imports. Only
+// captures relative specifiers — local files are what we can walk into;
+// npm packages are a dead end here.
+//
+// This captures the whole clause between `import` and `from` in one group,
+// then parses it manually, rather than trying to encode every combination
+// in one regex — an earlier version required a trailing comma before the
+// default-import capture group, which meant a plain `import X from "./y"`
+// (no named imports) silently matched nothing at all.
+export function extractRelativeImports(
   source: string,
 ): { specifier: string; identifiers: string[] }[] {
   const results: { specifier: string; identifiers: string[] }[] = [];
-  const importRegex =
-    /import\s+(?:(\w+)\s*,\s*)?(?:\{([^}]*)\})?\s*from\s+["'](\.[^"']+)["']/g;
+  const importRegex = /import\s+([^;]+?)\s+from\s+["'](\.[^"']+)["']/g;
 
   let match: RegExpExecArray | null;
   while ((match = importRegex.exec(source))) {
-    const [, defaultName, namedBlock, specifier] = match;
+    const [, clause, specifier] = match;
     const identifiers: string[] = [];
-    if (defaultName) identifiers.push(defaultName.trim());
-    if (namedBlock) {
-      namedBlock
+
+    if (clause.trim().startsWith("*")) {
+      // `import * as ns from "./x"` — not something we can resolve a
+      // single call-site identifier from meaningfully; skip.
+      continue;
+    }
+
+    const braceIdx = clause.indexOf("{");
+    const defaultPart = (braceIdx === -1 ? clause : clause.slice(0, braceIdx))
+      .replace(/,\s*$/, "")
+      .trim();
+    const namedPart =
+      braceIdx === -1
+        ? null
+        : clause.slice(braceIdx + 1, clause.lastIndexOf("}"));
+
+    if (defaultPart && /^\w+$/.test(defaultPart)) {
+      identifiers.push(defaultPart);
+    }
+
+    if (namedPart) {
+      namedPart
         .split(",")
         .map((s) =>
           s
@@ -72,6 +97,7 @@ function extractRelativeImports(
         .filter(Boolean)
         .forEach((id) => identifiers.push(id));
     }
+
     if (identifiers.length > 0) results.push({ specifier, identifiers });
   }
   return results;
@@ -129,13 +155,41 @@ function findFunctionBody(
 function extractBodyFields(handlerSource: string): string[] {
   const fields = new Set<string>();
 
-  const destructureMatch = handlerSource.match(/\{([^}]+)\}\s*=\s*req\.body/);
-  if (destructureMatch) {
-    destructureMatch[1]
-      .split(",")
-      .map((f) => f.trim().split(":")[0].split("=")[0].trim())
-      .filter(Boolean)
-      .forEach((f) => fields.add(f));
+  // Find `= req.body` and walk BACKWARD with proper brace-depth counting to
+  // find the destructure's matching `{ ... }`. A naive forward regex like
+  // /\{([^}]+)\}\s*=\s*req\.body/ breaks the moment the function has any
+  // earlier `{` (its own opening brace, a `try {`, etc.) — `[^}]+` doesn't
+  // exclude `{`, so it happily spans through nested braces and stops at
+  // the first `}` it finds, which is very often the WRONG one.
+  const assignMatch = handlerSource.match(/=\s*req\.body\b/);
+  if (assignMatch && assignMatch.index !== undefined) {
+    let i = assignMatch.index - 1;
+    while (i >= 0 && /\s/.test(handlerSource[i])) i--;
+
+    if (handlerSource[i] === "}") {
+      const closeBraceIdx = i;
+      let depth = 1;
+      let openBraceIdx = -1;
+      for (let j = closeBraceIdx - 1; j >= 0; j--) {
+        if (handlerSource[j] === "}") depth++;
+        else if (handlerSource[j] === "{") {
+          depth--;
+          if (depth === 0) {
+            openBraceIdx = j;
+            break;
+          }
+        }
+      }
+
+      if (openBraceIdx !== -1) {
+        handlerSource
+          .slice(openBraceIdx + 1, closeBraceIdx)
+          .split(",")
+          .map((f) => f.trim().split(":")[0].split("=")[0].trim())
+          .filter(Boolean)
+          .forEach((f) => fields.add(f));
+      }
+    }
   }
 
   const dotAccessRegex = /req\.body\.(\w+)/g;

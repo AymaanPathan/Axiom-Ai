@@ -11,6 +11,7 @@ import ConnectedServicesPanel, {
 import RequestSchemaPanel from "../components/RequestSchemaPanel";
 import ConnectedFilesPanel from "../components/ConnectedFilesPanel";
 import AIExplanationPanel from "../components/AiExplainPanel";
+import TelemetryPanel from "../components/TelementryPanel";
 
 /**
  * Axiom AI — API Workspace
@@ -159,6 +160,11 @@ export default function ApiWorkspace() {
           files={files}
           status={filesStatus}
           error={filesError}
+        />
+
+        <TelemetryPanel
+          repositoryId={repositoryId}
+          routeIndex={Number(routeIndex)}
         />
       </div>
     </div>

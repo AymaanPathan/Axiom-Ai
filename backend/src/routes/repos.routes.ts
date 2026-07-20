@@ -15,6 +15,8 @@ import { RunModel } from "../models/run.model.js";
 import { detectAppPort } from "../parsing/detect-port.js";
 import { resolveConnectedFiles } from "../parsing/connectedFiles.service.js";
 import { explainEndpoint } from "../services/explain.service.js";
+import { generateTrafficForRoute } from "../services/trafficGenerator.service.js";
+import { getRouteTelemetry } from "../services/signoz.service.js";
 
 const router = Router();
 
@@ -253,6 +255,95 @@ router.get("/:id/explain", requireAuth, async (req: AuthedRequest, res) => {
     console.error("Failed to generate AI explanation:", err);
     const message =
       err instanceof Error ? err.message : "Failed to generate explanation";
+    res.status(502).json({ error: message });
+  }
+});
+
+// POST /repos/:id/traffic — generate real traffic against one route on the
+// running container, so SigNoz has actual spans for it. Waits for the burst
+// to finish and returns the exact time window it ran in, so the caller can
+// hand that window straight to /telemetry.
+router.post("/:id/traffic", requireAuth, async (req: AuthedRequest, res) => {
+  const { routeIndex, requestCount } = req.body as {
+    routeIndex?: number;
+    requestCount?: number;
+  };
+
+  if (routeIndex === undefined) {
+    return res.status(400).json({ error: "routeIndex is required" });
+  }
+
+  const repository = await RepositoryModel.findOne({
+    _id: req.params.id,
+    userId: req.user!.githubId,
+  });
+  if (!repository)
+    return res.status(404).json({ error: "Repository not found" });
+
+  const route = repository.discoveredRoutes[routeIndex];
+  if (!route) return res.status(400).json({ error: "Unknown routeIndex" });
+
+  try {
+    const result = await generateTrafficForRoute({
+      appPort: repository.appPort,
+      method: route.method,
+      routePath: route.routePath,
+      repoRoot: path.resolve(repository.localPath),
+      routeFile: route.file,
+      routeLine: route.line,
+      requestCount: requestCount ?? 30,
+    });
+    res.json(result);
+  } catch (err) {
+    console.error("Failed to generate traffic:", err);
+    res.status(500).json({ error: "Failed to generate traffic" });
+  }
+});
+
+// GET /repos/:id/telemetry — pull real numbers from SigNoz for one route
+// over a given window (typically the window returned by /traffic above).
+router.get("/:id/telemetry", requireAuth, async (req: AuthedRequest, res) => {
+  const { routeIndex, start, end, service } = req.query as {
+    routeIndex?: string;
+    start?: string;
+    end?: string;
+    service?: string;
+  };
+
+  if (routeIndex === undefined || !start || !end) {
+    return res
+      .status(400)
+      .json({ error: "routeIndex, start, and end query params are required" });
+  }
+
+  const repository = await RepositoryModel.findOne({
+    _id: req.params.id,
+    userId: req.user!.githubId,
+  });
+  if (!repository)
+    return res.status(404).json({ error: "Repository not found" });
+
+  const route = repository.discoveredRoutes[Number(routeIndex)];
+  if (!route) return res.status(400).json({ error: "Unknown routeIndex" });
+
+  // Best-guess service name if the caller doesn't override it — check the
+  // Services list in your SigNoz instance to confirm this matches what
+  // your instrumentation actually reports (OTEL_SERVICE_NAME, etc.).
+  const serviceName = service || repository.githubFullName.split("/")[1];
+
+  try {
+    const telemetry = await getRouteTelemetry(
+      serviceName,
+      route.method,
+      route.routePath,
+      Number(start),
+      Number(end),
+    );
+    res.json(telemetry);
+  } catch (err) {
+    console.error("Failed to fetch SigNoz telemetry:", err);
+    const message =
+      err instanceof Error ? err.message : "Failed to fetch telemetry";
     res.status(502).json({ error: message });
   }
 });
