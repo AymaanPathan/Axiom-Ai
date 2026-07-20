@@ -10,6 +10,7 @@ import ConnectedServicesPanel, {
 } from "../components/ConnectedServicesPanel";
 import RequestSchemaPanel from "../components/RequestSchemaPanel";
 import ConnectedFilesPanel from "../components/ConnectedFilesPanel";
+import AIExplanationPanel from "../components/AiExplainPanel";
 
 /**
  * Axiom AI — API Workspace
@@ -133,6 +134,12 @@ export default function ApiWorkspace() {
       />
 
       <div className="flex flex-col gap-6">
+        <AIExplanationPanel
+          repositoryId={repositoryId}
+          file={route.file}
+          line={route.line}
+        />
+
         <ApiOverviewPanel
           method={route.method}
           routePath={route.routePath}
