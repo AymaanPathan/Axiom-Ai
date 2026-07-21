@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import {
   Area,
   AreaChart,
@@ -32,27 +32,19 @@ const MONO = "'Berkeley Mono', ui-monospace, monospace";
 const POLL_MS = 10_000;
 const SIGNOZ_BLUE = "#4c9aff";
 
-type Section =
-  | "overview"
-  | "logs"
-  | "traces"
-  | "errors"
-  | "endpoints"
-  | "infra";
+type Section = "overview" | "logs" | "traces" | "errors" | "infra";
 
 const SECTIONS: { key: Section; label: string }[] = [
   { key: "overview", label: "Overview" },
   { key: "logs", label: "Logs" },
   { key: "traces", label: "Traces" },
   { key: "errors", label: "Errors" },
-  { key: "endpoints", label: "Endpoints" },
   { key: "infra", label: "Infra" },
 ];
 
 export default function ObservabilityDashboard() {
   const { repositoryId = "" } = useParams<{ repositoryId: string }>();
   const [section, setSection] = useState<Section>("overview");
-
   const [health, setHealth] = useState<ServiceHealth | null>(null);
   const [system, setSystem] = useState<SystemStatus | null>(null);
   const [endpoints, setEndpoints] = useState<EndpointMetric[]>([]);
@@ -104,8 +96,6 @@ export default function ObservabilityDashboard() {
 
     const fetchers: Partial<Record<Section, () => Promise<void>>> = {
       overview: async () =>
-        setEndpoints(await getEndpointMetrics(repositoryId)),
-      endpoints: async () =>
         setEndpoints(await getEndpointMetrics(repositoryId)),
       traces: async () => setTraces(await getRecentTraces(repositoryId)),
       errors: async () => setErrors(await getRecentErrors(repositoryId)),
@@ -180,14 +170,12 @@ export default function ObservabilityDashboard() {
           history={metricHistory}
           endpointsPreview={endpoints.slice(0, 5)}
           activeEndpointCount={activeEndpointCount}
-          onViewAllEndpoints={() => setSection("endpoints")}
           repositoryId={repositoryId}
         />
       )}
       {section === "logs" && <LogsSection logs={logs} />}
       {section === "traces" && <TracesSection traces={traces} />}
       {section === "errors" && <ErrorsSection errors={errors} />}
-      {section === "endpoints" && <EndpointsSection endpoints={endpoints} repositoryId={repositoryId} />}
       {section === "infra" && <InfraSection system={system} health={health} />}
     </div>
   );
@@ -231,16 +219,12 @@ function StatusStrip({
 function OverviewSection({
   latest,
   history,
-  endpointsPreview,
   activeEndpointCount,
-  onViewAllEndpoints,
-  repositoryId,
 }: {
   latest: ReturnType<typeof useServiceObserver>["latestMetric"];
   history: ReturnType<typeof useServiceObserver>["metricHistory"];
   endpointsPreview: EndpointMetric[];
   activeEndpointCount: number;
-  onViewAllEndpoints: () => void;
   repositoryId: string;
 }) {
   const chartData = history.map((m) => ({
@@ -354,28 +338,6 @@ function OverviewSection({
             </ResponsiveContainer>
           </ChartCard>
         </div>
-      </div>
-
-      <div className="rounded-xl border border-[#161718] bg-[#0d0e0f]">
-        <div className="flex items-center justify-between border-b border-[#161718] px-4 py-2.5">
-          <span className="text-[12px] text-[#62666d]">Top endpoints</span>
-          <button
-            onClick={onViewAllEndpoints}
-            className="text-[12px] text-[#4c9aff] hover:underline"
-          >
-            View all
-          </button>
-        </div>
-        {endpointsPreview.length === 0 ? (
-          <p className="px-4 py-4 text-[12px] text-[#4c4f54]">
-            No traffic observed yet.
-          </p>
-        ) : (
-          <EndpointRows
-            endpoints={endpointsPreview}
-            repositoryId={repositoryId}
-          />
-        )}
       </div>
     </div>
   );
@@ -533,88 +495,7 @@ function ErrorsSection({ errors }: { errors: ErrorEvent[] }) {
   );
 }
 
-function EndpointsSection({
-  endpoints,
-  repositoryId,
-}: {
-  endpoints: EndpointMetric[];
-  repositoryId: string;
-}) {
-  if (endpoints.length === 0) {
-    return (
-      <p className="text-[12px] text-[#4c4f54]">
-        No endpoint traffic observed yet.
-      </p>
-    );
-  }
-  return (
-    <div className="overflow-hidden rounded-xl border border-[#161718]">
-      <EndpointRows
-        endpoints={endpoints}
-        showHeader
-        repositoryId={repositoryId}
-      />
-    </div>
-  );
-}
 
-function EndpointRows({
-  endpoints,
-  showHeader,
-  repositoryId,
-}: {
-  endpoints: EndpointMetric[];
-  showHeader?: boolean;
-  repositoryId: string;
-}) {
-  const navigate = useNavigate();
-
-  return (
-    <table className="w-full text-[12px]">
-      {showHeader && (
-        <thead>
-          <tr className="border-b border-[#161718] bg-[#0d0e0f] text-[#62666d]">
-            <th className="px-4 py-2 text-left font-medium">Route</th>
-            <th className="px-4 py-2 text-right font-medium">Requests</th>
-            <th className="px-4 py-2 text-right font-medium">Errors</th>
-            <th className="px-4 py-2 text-right font-medium">Avg</th>
-            <th className="px-4 py-2 text-right font-medium">p95</th>
-          </tr>
-        </thead>
-      )}
-      <tbody>
-        {endpoints.map((e, i) => (
-          <tr
-            key={`${e.method}-${e.routePath}`}
-            onClick={() =>
-              navigate(`/workspace/repos/${repositoryId}/endpoints/${i}`)
-            }
-            className="cursor-pointer border-b border-[#161718] last:border-0 hover:bg-[#131415]"
-          >
-            <td className="px-4 py-2">
-              <span className="text-[#4c9aff]">{e.method}</span> {e.routePath}
-            </td>
-            <td className="px-4 py-2 text-right" style={{ fontFamily: MONO }}>
-              {e.requestCount}
-            </td>
-            <td
-              className={`px-4 py-2 text-right ${e.errorCount > 0 ? "text-[#eb5757]" : "text-[#62666d]"}`}
-              style={{ fontFamily: MONO }}
-            >
-              {e.errorCount}
-            </td>
-            <td className="px-4 py-2 text-right" style={{ fontFamily: MONO }}>
-              {e.avgLatencyMs.toFixed(0)}ms
-            </td>
-            <td className="px-4 py-2 text-right" style={{ fontFamily: MONO }}>
-              {e.p95Ms.toFixed(0)}ms
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
-}
 
 function InfraSection({
   system,

@@ -6,6 +6,7 @@ import RepoDetail from "./pages/RepoDetail";
 import ApiWorkspace from "./pages/ApiWorkSpace";
 import RequireAuth from "./routes/RequireAuth";
 import ObservabilityDashboard from "./pages/ObservabilityDashboard";
+import EndpointsPage from "./pages/EndpointsPage";
 
 export default function App() {
   return (
@@ -23,12 +24,16 @@ export default function App() {
           <Route index element={<RepositoriesPage />} />
           <Route path="repos/:repositoryId" element={<RepoDetail />} />
           <Route
-            path="repos/:repositoryId/endpoints/:routeIndex"
-            element={<ApiWorkspace />}
-          />
-          <Route
             path="repos/:repositoryId/observability"
             element={<ObservabilityDashboard />}
+          />
+          <Route
+            path="repos/:repositoryId/endpoints"
+            element={<EndpointsPage />}
+          />
+          <Route
+            path="repos/:repositoryId/endpoints/:routeIndex"
+            element={<ApiWorkspace />}
           />
         </Route>
       </Routes>
