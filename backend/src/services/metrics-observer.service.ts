@@ -2,9 +2,12 @@
 //
 // Fills the gap the frontend has been calling into since the start:
 // getServiceHealth / getSystemStatus / getMetricHistory (REST) and the
-// service:metrics socket push. None of this existed on the backend before
-// — Overview's CPU/Memory/Req-s/Error-rate cards and charts were always
-// going to stay empty until this was built.
+// service:metrics socket push.
+//
+// PARSING FIX: getServiceAggregate previously used findAliasValue(), which
+// cannot read SigNoz v5 scalar responses (see signoz.service.ts header for
+// why). Switched to extractScalarValues(), which reads by position instead
+// of by alias-as-object-key.
 
 import { spawn } from "node:child_process";
 import mongoose from "mongoose";
@@ -12,10 +15,10 @@ import { getIO } from "../config/socket.js";
 import { RunModel } from "../models/run.model.js";
 import {
   runScalarTraceQuerySafe,
+  extractScalarValues,
   SERVICE_ATTRIBUTE,
   DURATION_ATTRIBUTE,
   nanoToMs,
-  findAliasValue,
 } from "./signoz.service.js";
 
 export interface MetricSnapshot {
@@ -123,39 +126,43 @@ async function getServiceAggregate(
   const escapedService = serviceName.replace(/'/g, "\\'");
   const filter = `${SERVICE_ATTRIBUTE} = '${escapedService}'`;
 
-  const latencyResult = await runScalarTraceQuerySafe(
+  const latencyAggregations = [
+    { expression: `p50(${DURATION_ATTRIBUTE})`, alias: "p50" },
+    { expression: `p95(${DURATION_ATTRIBUTE})`, alias: "p95" },
+    { expression: `p99(${DURATION_ATTRIBUTE})`, alias: "p99" },
+    { expression: "count()", alias: "request_count" },
+  ];
+  const latencyRaw = await runScalarTraceQuerySafe(
     start,
     end,
     filter,
-    [
-      { expression: `p50(${DURATION_ATTRIBUTE})`, alias: "p50" },
-      { expression: `p95(${DURATION_ATTRIBUTE})`, alias: "p95" },
-      { expression: `p99(${DURATION_ATTRIBUTE})`, alias: "p99" },
-      { expression: "count()", alias: "request_count" },
-    ],
+    latencyAggregations,
     "service aggregate latency/request count",
     warnings,
   );
+  const latencyValues = extractScalarValues(latencyRaw, latencyAggregations);
 
-  const errorResult = await runScalarTraceQuerySafe(
+  const errorAggregations = [{ expression: "count()", alias: "error_count" }];
+  const errorRaw = await runScalarTraceQuerySafe(
     start,
     end,
     `${filter} AND hasError = true`,
-    [{ expression: "count()", alias: "error_count" }],
+    errorAggregations,
     "service aggregate error count",
     warnings,
   );
+  const errorValues = extractScalarValues(errorRaw, errorAggregations);
 
-  const requestCount = findAliasValue(latencyResult, "request_count") ?? 0;
-  const errorCount = findAliasValue(errorResult, "error_count") ?? 0;
+  const requestCount = latencyValues.request_count ?? 0;
+  const errorCount = errorValues.error_count ?? 0;
   const windowSeconds = windowMs / 1000;
 
   return {
     requestRate: requestCount / windowSeconds,
     errorRate: requestCount > 0 ? errorCount / requestCount : 0,
-    p50Ms: nanoToMs(findAliasValue(latencyResult, "p50")),
-    p95Ms: nanoToMs(findAliasValue(latencyResult, "p95")),
-    p99Ms: nanoToMs(findAliasValue(latencyResult, "p99")),
+    p50Ms: nanoToMs(latencyValues.p50),
+    p95Ms: nanoToMs(latencyValues.p95),
+    p99Ms: nanoToMs(latencyValues.p99),
   };
 }
 

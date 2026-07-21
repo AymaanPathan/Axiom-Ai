@@ -1,14 +1,18 @@
-// signoz.client.ts — only diffs from your version:
+// signoz.service.ts — parsing fix
 //
-// 1. RouteTelemetry.latencyMs gains `avg` (needed for EndpointMetric.avgLatencyMs)
-// 2. getConfig, runScalarTraceQuery, runScalarTraceQuerySafe, findAliasValue,
-//    nanoToMs, debugLog, SEMCONV, ROUTE_ATTRIBUTE, SERVICE_ATTRIBUTE,
-//    DURATION_ATTRIBUTE are now exported — new observability service needs them
-// 3. New exported function: runRawTraceQuerySafe (list-mode queries for
-//    recent traces / errors — traces API supports requestType: "raw" for
-//    individual span rows: https://signoz.io/docs/apm-and-distributed-tracing/traces-api/)
-// 4. Added console.log/console.error logging (always-on, not gated by
-//    SIGNOZ_DEBUG) so real failures/misses surface even in prod-ish runs.
+// ROOT CAUSE OF "everything shows 0": SigNoz v5 scalar responses do NOT
+// embed the aggregation alias anywhere in the JSON. Each column comes back
+// as { name: "__result_0", aggregationIndex: 0, ... } and the actual
+// numbers live in a positional array: data: [[val0, val1, val2, ...]].
+// The old findAliasValue() searched the tree for an object key literally
+// matching the alias string ("p50", "request_count", etc.) — that key
+// never exists in this shape, so it always returned null, and every call
+// site silently fell back to `?? 0`. Real telemetry was being fetched
+// successfully the whole time; it just never got read out of the response.
+//
+// Fix: extract by position. The order of the "columns"/"data" arrays in
+// the response matches the order of the `aggregations` array you sent in
+// the request, so aggregationIndex N corresponds to aggregations[N].
 
 export interface RouteTelemetry {
   service: string;
@@ -164,11 +168,6 @@ export async function runScalarTraceQuery(
 // NEW: list-mode query — returns individual span rows instead of a scalar
 // aggregate. Used for "recent traces" and "recent errors" where you need
 // one row per request, not a single number.
-//
-// UNVERIFIED against your instance's exact response shape (unlike the
-// scalar queries above, which your own getRouteTelemetry has already
-// proven work). Run with SIGNOZ_DEBUG=true, trigger a request, and paste
-// me one raw response body — I'll tighten extractRows() to match exactly.
 export async function runRawTraceQuery(
   start: number,
   end: number,
@@ -322,6 +321,9 @@ export async function runRawTraceQuerySafe(
   }
 }
 
+// DEPRECATED: kept only in case anything external still imports it. Do not
+// use for new code — it cannot parse SigNoz v5 scalar responses (see file
+// header). Prefer extractScalarValues() below.
 export function findAliasValue(node: unknown, alias: string): number | null {
   if (node === null || node === undefined) return null;
 
@@ -351,6 +353,50 @@ export function findAliasValue(node: unknown, alias: string): number | null {
   }
 
   return null;
+}
+
+// Extracts values from a SigNoz v5 scalar response by POSITION, matching
+// the order of the `aggregations` array you sent in the request. This is
+// the correct way to read a scalar response — the JSON has no alias-keyed
+// fields to search for.
+//
+// Response shape (scalar, single row):
+//   { status, data: { data: { results: [ { columns: [...], data: [[v0, v1, ...]] } ] } } }
+export function extractScalarValues(
+  raw: unknown,
+  aggregations: { alias: string }[],
+): Record<string, number | null> {
+  const result: Record<string, number | null> = {};
+  for (const agg of aggregations) result[agg.alias] = null;
+
+  if (!raw || typeof raw !== "object") return result;
+
+  const results = (raw as Record<string, any>)?.data?.data?.results;
+  if (!Array.isArray(results) || results.length === 0) {
+    debugLog("extractScalarValues: no results[] in response");
+    return result;
+  }
+
+  const rows: unknown[][] | undefined = results[0]?.data;
+  if (!Array.isArray(rows) || rows.length === 0 || !Array.isArray(rows[0])) {
+    debugLog("extractScalarValues: no data row in results[0]");
+    return result;
+  }
+
+  const row = rows[0];
+  aggregations.forEach((agg, i) => {
+    const val = row[i];
+    if (typeof val === "number" && !Number.isNaN(val)) {
+      result[agg.alias] = val;
+    } else if (typeof val === "string" && val.trim() !== "") {
+      const num = Number(val);
+      result[agg.alias] = Number.isNaN(num) ? null : num;
+    } else {
+      result[agg.alias] = null; // covers null, undefined, ""
+    }
+  });
+
+  return result;
 }
 
 export function nanoToMs(nano: number | null): number {
@@ -383,68 +429,78 @@ export async function getRouteTelemetry(
   const escapedService = service.replace(/'/g, "\\'");
   const warnings: string[] = [];
 
-  const latencyResult = await runScalarTraceQuerySafe(
+  const latencyAggregations: Aggregation[] = [
+    { expression: `p50(${DURATION_ATTRIBUTE})`, alias: "p50" },
+    { expression: `p95(${DURATION_ATTRIBUTE})`, alias: "p95" },
+    { expression: `p99(${DURATION_ATTRIBUTE})`, alias: "p99" },
+    { expression: `avg(${DURATION_ATTRIBUTE})`, alias: "avg" },
+    { expression: "count()", alias: "request_count" },
+  ];
+  const latencyRaw = await runScalarTraceQuerySafe(
     start,
     end,
     routeFilter,
-    [
-      { expression: `p50(${DURATION_ATTRIBUTE})`, alias: "p50" },
-      { expression: `p95(${DURATION_ATTRIBUTE})`, alias: "p95" },
-      { expression: `p99(${DURATION_ATTRIBUTE})`, alias: "p99" },
-      { expression: `avg(${DURATION_ATTRIBUTE})`, alias: "avg" },
-      { expression: "count()", alias: "request_count" },
-    ],
+    latencyAggregations,
     "latency/request count",
     warnings,
   );
+  const latencyValues = extractScalarValues(latencyRaw, latencyAggregations);
 
-  const errorResult = await runScalarTraceQuerySafe(
+  const errorAggregations: Aggregation[] = [
+    { expression: "count()", alias: "error_count" },
+  ];
+  const errorRaw = await runScalarTraceQuerySafe(
     start,
     end,
     `${routeFilter} AND hasError = true`,
-    [{ expression: "count()", alias: "error_count" }],
+    errorAggregations,
     "error count",
     warnings,
   );
+  const errorValues = extractScalarValues(errorRaw, errorAggregations);
 
-  const dbResult = await runScalarTraceQuerySafe(
+  const dbAggregations: Aggregation[] = [
+    { expression: `avg(${DURATION_ATTRIBUTE})`, alias: "db_avg_duration" },
+    { expression: "count()", alias: "db_call_count" },
+  ];
+  const dbRaw = await runScalarTraceQuerySafe(
     start,
     end,
     `${SERVICE_ATTRIBUTE} = '${escapedService}' AND dbSystem EXISTS`,
-    [
-      { expression: `avg(${DURATION_ATTRIBUTE})`, alias: "db_avg_duration" },
-      { expression: "count()", alias: "db_call_count" },
-    ],
+    dbAggregations,
     "DB span timings (no db.* spans ingested yet for this service?)",
     warnings,
   );
+  const dbValues = extractScalarValues(dbRaw, dbAggregations);
 
-  const externalResult = await runScalarTraceQuerySafe(
+  const externalAggregations: Aggregation[] = [
+    {
+      expression: `avg(${DURATION_ATTRIBUTE})`,
+      alias: "external_avg_duration",
+    },
+    { expression: "count()", alias: "external_call_count" },
+  ];
+  const externalRaw = await runScalarTraceQuerySafe(
     start,
     end,
     `${SERVICE_ATTRIBUTE} = '${escapedService}' AND http.url EXISTS AND ${ROUTE_ATTRIBUTE} NOT EXISTS`,
-    [
-      {
-        expression: `avg(${DURATION_ATTRIBUTE})`,
-        alias: "external_avg_duration",
-      },
-      { expression: "count()", alias: "external_call_count" },
-    ],
+    externalAggregations,
     "external call timings (no outbound http.url spans ingested yet?)",
     warnings,
   );
+  const externalValues = extractScalarValues(externalRaw, externalAggregations);
 
-  const requestCount = findAliasValue(latencyResult, "request_count") ?? 0;
-  const errorCount = findAliasValue(errorResult, "error_count") ?? 0;
-  const dbAvg = findAliasValue(dbResult, "db_avg_duration");
-  const externalAvg = findAliasValue(externalResult, "external_avg_duration");
+  const requestCount = latencyValues.request_count ?? 0;
+  const errorCount = errorValues.error_count ?? 0;
+  const dbAvg = dbValues.db_avg_duration ?? null;
+  const externalAvg = externalValues.external_avg_duration ?? null;
 
   if (requestCount === 0) {
     debugLog(
-      "requestCount is 0 — filter matched no spans. Check service name / attribute names / time window.",
+      "requestCount is 0 — filter matched no spans (or no traffic in window). Check service name / attribute names / time window.",
     );
     console.warn(
-      `[SigNoz] getRouteTelemetry(${service}, ${method}, ${routePath}): requestCount is 0 — filter matched no spans. Check service name / attribute names / time window.`,
+      `[SigNoz] getRouteTelemetry(${service}, ${method}, ${routePath}): requestCount is 0 — filter matched no spans (or no traffic in window).`,
     );
   }
 
@@ -471,18 +527,18 @@ export async function getRouteTelemetry(
         ? Math.round((errorCount / requestCount) * 10000) / 100
         : 0,
     latencyMs: {
-      p50: nanoToMs(findAliasValue(latencyResult, "p50")),
-      p95: nanoToMs(findAliasValue(latencyResult, "p95")),
-      p99: nanoToMs(findAliasValue(latencyResult, "p99")),
-      avg: nanoToMs(findAliasValue(latencyResult, "avg")), // NEW
+      p50: nanoToMs(latencyValues.p50),
+      p95: nanoToMs(latencyValues.p95),
+      p99: nanoToMs(latencyValues.p99),
+      avg: nanoToMs(latencyValues.avg),
     },
     db: {
       avgDurationMs: dbAvg !== null ? nanoToMs(dbAvg) : null,
-      callCount: findAliasValue(dbResult, "db_call_count") ?? 0,
+      callCount: dbValues.db_call_count ?? 0,
     },
     external: {
       avgDurationMs: externalAvg !== null ? nanoToMs(externalAvg) : null,
-      callCount: findAliasValue(externalResult, "external_call_count") ?? 0,
+      callCount: externalValues.external_call_count ?? 0,
     },
     warnings,
   };

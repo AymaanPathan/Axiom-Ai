@@ -30,6 +30,7 @@ import { useServiceObserver } from "../hooks/useServiceObserver";
 
 const MONO = "'Berkeley Mono', ui-monospace, monospace";
 const POLL_MS = 10_000;
+const SIGNOZ_BLUE = "#4c9aff";
 
 type Section =
   | "overview"
@@ -70,7 +71,6 @@ export default function ObservabilityDashboard() {
   }, [repositoryId]);
 
   // Health + system status: cheap, always poll regardless of active tab.
-  // Health + system status: cheap, always poll regardless of active tab.
   useEffect(() => {
     if (!repositoryId) return;
     let inFlight = false;
@@ -94,13 +94,17 @@ export default function ObservabilityDashboard() {
     const interval = setInterval(tick, POLL_MS);
     return () => clearInterval(interval);
   }, [repositoryId]);
+
   // Section-scoped polling — only fetch what's currently visible.
-  // Section-scoped polling — only fetch what's currently visible.
+  // Endpoints is fetched regardless of section since Overview now needs
+  // it for the "Active Endpoints" count.
   useEffect(() => {
     if (!repositoryId) return;
     let inFlight = false;
 
     const fetchers: Partial<Record<Section, () => Promise<void>>> = {
+      overview: async () =>
+        setEndpoints(await getEndpointMetrics(repositoryId)),
       endpoints: async () =>
         setEndpoints(await getEndpointMetrics(repositoryId)),
       traces: async () => setTraces(await getRecentTraces(repositoryId)),
@@ -127,6 +131,10 @@ export default function ObservabilityDashboard() {
   }, [section, repositoryId]);
 
   const errorCount = useMemo(() => errors.length, [errors]);
+  const activeEndpointCount = useMemo(
+    () => endpoints.filter((e) => e.requestCount > 0).length,
+    [endpoints],
+  );
 
   return (
     <div
@@ -171,6 +179,7 @@ export default function ObservabilityDashboard() {
           latest={latestMetric}
           history={metricHistory}
           endpointsPreview={endpoints.slice(0, 5)}
+          activeEndpointCount={activeEndpointCount}
           onViewAllEndpoints={() => setSection("endpoints")}
         />
       )}
@@ -222,11 +231,13 @@ function OverviewSection({
   latest,
   history,
   endpointsPreview,
+  activeEndpointCount,
   onViewAllEndpoints,
 }: {
   latest: ReturnType<typeof useServiceObserver>["latestMetric"];
   history: ReturnType<typeof useServiceObserver>["metricHistory"];
   endpointsPreview: EndpointMetric[];
+  activeEndpointCount: number;
   onViewAllEndpoints: () => void;
 }) {
   const chartData = history.map((m) => ({
@@ -242,84 +253,104 @@ function OverviewSection({
   }));
 
   return (
-    <div className="flex flex-col gap-5">
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-        <MetricCard
-          label="CPU"
-          value={latest ? `${latest.cpuPercent.toFixed(1)}%` : "—"}
-        />
-        <MetricCard
-          label="Memory"
-          value={latest ? `${latest.memoryMB.toFixed(0)} MB` : "—"}
-        />
-        <MetricCard
-          label="Req/s"
-          value={latest ? latest.requestRate.toFixed(1) : "—"}
-        />
-        <MetricCard
-          label="Error rate"
-          value={latest ? `${(latest.errorRate * 100).toFixed(2)}%` : "—"}
-          alert={!!latest && latest.errorRate > 0.02}
-        />
+    <div className="flex flex-col gap-6">
+      {/* SigNoz-derived — this is what judges should see first */}
+      <div>
+        <SectionHeader title="Service Health" badge="Powered by SigNoz" />
+        <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <MetricCard
+            label="Requests/sec"
+            value={latest ? latest.requestRate.toFixed(1) : "—"}
+          />
+          <MetricCard
+            label="P95 Latency"
+            value={latest ? `${latest.p95Ms.toFixed(0)} ms` : "—"}
+          />
+          <MetricCard
+            label="Error Rate"
+            value={latest ? `${(latest.errorRate * 100).toFixed(2)}%` : "—"}
+            alert={!!latest && latest.errorRate > 0.02}
+          />
+          <MetricCard
+            label="Active Endpoints"
+            value={String(activeEndpointCount)}
+          />
+        </div>
+
+        <div className="mt-4">
+          <ChartCard title="Latency (p50 / p95 / p99)">
+            <ResponsiveContainer width="100%" height={190}>
+              <LineChart data={chartData}>
+                <CartesianGrid stroke="#161718" vertical={false} />
+                <XAxis dataKey="time" stroke="#4c4f54" fontSize={10} />
+                <YAxis stroke="#4c4f54" fontSize={10} />
+                <Tooltip contentStyle={tooltipStyle} />
+                <Line
+                  type="monotone"
+                  dataKey="p50"
+                  stroke="#62666d"
+                  dot={false}
+                  strokeWidth={1.5}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="p95"
+                  stroke={SIGNOZ_BLUE}
+                  dot={false}
+                  strokeWidth={1.5}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="p99"
+                  stroke="#eb5757"
+                  dot={false}
+                  strokeWidth={1.5}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </ChartCard>
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <ChartCard title="CPU & Memory">
-          <ResponsiveContainer width="100%" height={190}>
-            <AreaChart data={chartData}>
-              <CartesianGrid stroke="#161718" vertical={false} />
-              <XAxis dataKey="time" stroke="#4c4f54" fontSize={10} />
-              <YAxis stroke="#4c4f54" fontSize={10} />
-              <Tooltip contentStyle={tooltipStyle} />
-              <Area
-                type="monotone"
-                dataKey="cpu"
-                name="CPU %"
-                stroke="#4c9aff"
-                fill="#4c9aff22"
-              />
-              <Area
-                type="monotone"
-                dataKey="memory"
-                name="Mem MB"
-                stroke="#27a644"
-                fill="#27a64422"
-              />
-            </AreaChart>
-          </ResponsiveContainer>
-        </ChartCard>
-
-        <ChartCard title="Latency (p50 / p95 / p99)">
-          <ResponsiveContainer width="100%" height={190}>
-            <LineChart data={chartData}>
-              <CartesianGrid stroke="#161718" vertical={false} />
-              <XAxis dataKey="time" stroke="#4c4f54" fontSize={10} />
-              <YAxis stroke="#4c4f54" fontSize={10} />
-              <Tooltip contentStyle={tooltipStyle} />
-              <Line
-                type="monotone"
-                dataKey="p50"
-                stroke="#62666d"
-                dot={false}
-                strokeWidth={1.5}
-              />
-              <Line
-                type="monotone"
-                dataKey="p95"
-                stroke="#4c9aff"
-                dot={false}
-                strokeWidth={1.5}
-              />
-              <Line
-                type="monotone"
-                dataKey="p99"
-                stroke="#eb5757"
-                dot={false}
-                strokeWidth={1.5}
-              />
-            </LineChart>
-          </ResponsiveContainer>
-        </ChartCard>
+      {/* Docker-derived — demoted below the fold */}
+      <div>
+        <SectionHeader title="Infrastructure" />
+        <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <MetricCard
+            label="CPU"
+            value={latest ? `${latest.cpuPercent.toFixed(1)}%` : "—"}
+          />
+          <MetricCard
+            label="Memory"
+            value={latest ? `${latest.memoryMB.toFixed(0)} MB` : "—"}
+          />
+        </div>
+        <div className="mt-4">
+          <ChartCard title="CPU & Memory">
+            <ResponsiveContainer width="100%" height={190}>
+              <AreaChart data={chartData}>
+                <CartesianGrid stroke="#161718" vertical={false} />
+                <XAxis dataKey="time" stroke="#4c4f54" fontSize={10} />
+                <YAxis stroke="#4c4f54" fontSize={10} />
+                <Tooltip contentStyle={tooltipStyle} />
+                <Area
+                  type="monotone"
+                  dataKey="cpu"
+                  name="CPU %"
+                  stroke={SIGNOZ_BLUE}
+                  fill={`${SIGNOZ_BLUE}22`}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="memory"
+                  name="Mem MB"
+                  stroke="#27a644"
+                  fill="#27a64422"
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          </ChartCard>
+        </div>
       </div>
 
       <div className="rounded-xl border border-[#161718] bg-[#0d0e0f]">
@@ -340,6 +371,24 @@ function OverviewSection({
           <EndpointRows endpoints={endpointsPreview} />
         )}
       </div>
+    </div>
+  );
+}
+
+function SectionHeader({ title, badge }: { title: string; badge?: string }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-[11px] font-medium uppercase tracking-wide text-[#62666d]">
+        {title}
+      </span>
+      {badge && (
+        <span
+          className="rounded-full px-2 py-0.5 text-[10px]"
+          style={{ background: `${SIGNOZ_BLUE}1a`, color: SIGNOZ_BLUE }}
+        >
+          {badge}
+        </span>
+      )}
     </div>
   );
 }
