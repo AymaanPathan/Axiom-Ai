@@ -16,6 +16,16 @@ export function initSocket(httpServer: HTTPServer): IOServer {
     socket.on("run:unsubscribe", (runId: string) =>
       socket.leave(`run:${runId}`),
     );
+
+    // NEW — repo-scoped room, used by the Observability dashboard's live
+    // logs/metrics feed (independent of any single runId, since runs are
+    // ephemeral and the dashboard shouldn't need to know the current one).
+    socket.on("service:subscribe", (repositoryId: string) =>
+      socket.join(`repo:${repositoryId}`),
+    );
+    socket.on("service:unsubscribe", (repositoryId: string) =>
+      socket.leave(`repo:${repositoryId}`),
+    );
   });
 
   return io;

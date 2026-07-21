@@ -7,7 +7,6 @@ import { cloneRepo } from "../github/clone.service.js";
 import { detectFramework } from "../parsing/framework-detect.js";
 import { parseRoutes } from "../parsing/route-parser.js";
 import { RepositoryModel } from "../models/repository.model.js";
-import { generateInstrumentation } from "../instrumental/Instrumentation.service.js";
 import { detectRequiredEnvVars } from "../parsing/env-detect.js";
 import { encryptEnvValue, decryptEnvValue } from "../utils/env-crypto.js";
 import { startDockerRun } from "../docker/docker-run.service.js";
@@ -17,6 +16,16 @@ import { resolveConnectedFiles } from "../parsing/connectedFiles.service.js";
 import { explainEndpoint } from "../services/explain.service.js";
 import { generateTrafficForRoute } from "../services/trafficGenerator.service.js";
 import { getRouteTelemetry } from "../services/signoz.service.js";
+import {
+  getServiceHealth,
+  getSystemStatus,
+  getMetricHistory,
+} from "../services/metrics-observer.service.js";
+import {
+  getEndpointMetrics,
+  getRecentTraces,
+  getRecentErrors,
+} from "../services/signoz-observability.service.js";
 
 const router = Router();
 
@@ -348,32 +357,6 @@ router.get("/:id/telemetry", requireAuth, async (req: AuthedRequest, res) => {
   }
 });
 
-// POST /repos/:id/instrument — generate OTel instrumentation files for SigNoz
-router.post("/:id/instrument", requireAuth, async (req: AuthedRequest, res) => {
-  const repository = await RepositoryModel.findOne({
-    _id: req.params.id,
-    userId: req.user!.githubId,
-  });
-
-  if (!repository) {
-    return res.status(404).json({ error: "Repository not found" });
-  }
-
-  try {
-    const result = generateInstrumentation(repository.githubFullName);
-
-    // Track that instrumentation has been generated for this repo so the
-    // frontend can show "Instrumented" on revisit without regenerating.
-    repository.instrumentationGeneratedAt = new Date();
-    await repository.save();
-
-    res.json(result);
-  } catch (err) {
-    console.error("Failed to generate instrumentation:", err);
-    res.status(500).json({ error: "Failed to generate instrumentation" });
-  }
-});
-
 // GET /repos/:id/env — which vars are required vs already provided
 router.get("/:id/env", requireAuth, async (req: AuthedRequest, res) => {
   const repository = await RepositoryModel.findOne({
@@ -453,12 +436,15 @@ router.post("/:id/run", requireAuth, async (req: AuthedRequest, res) => {
     decrypted[entry.key] = decryptEnvValue(entry);
   }
 
+  const serviceName = repository.githubFullName.split("/")[1];
+
   const runId = await startDockerRun({
     repositoryId: repository._id.toString(),
     userId: req.user!.githubId,
     localPath: repository.localPath,
     envVars: decrypted,
     appPort: repository.appPort,
+    serviceName,
   });
 
   res.status(202).json({ runId, status: "starting", port: repository.appPort });
@@ -473,5 +459,139 @@ router.get("/:id/runs/:runId", requireAuth, async (req: AuthedRequest, res) => {
   if (!run) return res.status(404).json({ error: "Run not found" });
   res.json(run);
 });
+
+router.get(
+  "/:id/observability/endpoints",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    const repository = await RepositoryModel.findOne({
+      _id: req.params.id,
+      userId: req.user!.githubId,
+    });
+    if (!repository)
+      return res.status(404).json({ error: "Repository not found" });
+
+    const serviceName = repository.githubFullName.split("/")[1];
+
+    try {
+      const endpoints = await getEndpointMetrics(
+        serviceName,
+        repository.discoveredRoutes,
+      );
+      res.json({ endpoints });
+    } catch (err) {
+      console.error("Failed to fetch endpoint metrics:", err);
+      res.status(502).json({ error: "Failed to fetch endpoint metrics" });
+    }
+  },
+);
+
+// GET /repos/:id/observability/traces
+router.get(
+  "/:id/observability/traces",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    const repository = await RepositoryModel.findOne({
+      _id: req.params.id,
+      userId: req.user!.githubId,
+    });
+    if (!repository)
+      return res.status(404).json({ error: "Repository not found" });
+
+    const serviceName = repository.githubFullName.split("/")[1];
+    const limit = Number(req.query.limit) || 20;
+
+    try {
+      const { traces, warnings } = await getRecentTraces(
+        serviceName,
+        15,
+        limit,
+      );
+      if (warnings.length) console.warn("[observability/traces]", warnings);
+      res.json({ traces });
+    } catch (err) {
+      console.error("Failed to fetch recent traces:", err);
+      res.status(502).json({ error: "Failed to fetch recent traces" });
+    }
+  },
+);
+
+// GET /repos/:id/observability/errors
+router.get(
+  "/:id/observability/errors",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    const repository = await RepositoryModel.findOne({
+      _id: req.params.id,
+      userId: req.user!.githubId,
+    });
+    if (!repository)
+      return res.status(404).json({ error: "Repository not found" });
+
+    const serviceName = repository.githubFullName.split("/")[1];
+    const limit = Number(req.query.limit) || 20;
+
+    try {
+      const { errors, warnings } = await getRecentErrors(
+        serviceName,
+        15,
+        limit,
+      );
+      if (warnings.length) console.warn("[observability/errors]", warnings);
+      res.json({ errors });
+    } catch (err) {
+      console.error("Failed to fetch recent errors:", err);
+      res.status(502).json({ error: "Failed to fetch recent errors" });
+    }
+  },
+);
+
+router.get(
+  "/:id/observability/health",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    const repository = await RepositoryModel.findOne({
+      _id: req.params.id,
+      userId: req.user!.githubId,
+    });
+    if (!repository)
+      return res.status(404).json({ error: "Repository not found" });
+
+    const health = await getServiceHealth(repository._id.toString());
+    res.json(health);
+  },
+);
+
+router.get(
+  "/:id/observability/system",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    const repository = await RepositoryModel.findOne({
+      _id: req.params.id,
+      userId: req.user!.githubId,
+    }); 
+    if (!repository)
+      return res.status(404).json({ error: "Repository not found" });
+
+    const system = await getSystemStatus(repository._id.toString());
+    res.json(system);
+  },
+);
+
+router.get(
+  "/:id/observability/metrics/history",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    const repository = await RepositoryModel.findOne({
+      _id: req.params.id,
+      userId: req.user!.githubId,
+    });
+    if (!repository)
+      return res.status(404).json({ error: "Repository not found" });
+
+    const points = getMetricHistory(repository._id.toString());
+    res.json({ points });
+  },
+);
 
 export default router;

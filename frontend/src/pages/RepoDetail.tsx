@@ -101,6 +101,28 @@ export default function RepoDetail() {
             </div>
           </div>
 
+          <div className="rounded-xl border border-[#23252a] bg-[#0f1011] p-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-medium text-white">
+                  Service Observability
+                </h3>
+
+                <p className="mt-1 text-xs text-[#62666d]">
+                  Monitor logs, traces, metrics, CPU, memory and endpoint
+                  activity.
+                </p>
+              </div>
+
+              <Link
+                to={`/workspace/repos/${repositoryId}/observability`}
+                className="rounded-lg bg-[#4c9aff] px-4 py-2 text-sm text-white hover:bg-[#3d8af5]"
+              >
+                Open Dashboard →
+              </Link>
+            </div>
+          </div>
+
           {/* Routes */}
           <div className="rounded-xl border border-[#23252a] bg-[#0f1011]">
             <div className="border-b border-[#23252a] px-5 py-3">
@@ -145,7 +167,6 @@ export default function RepoDetail() {
             onAllSet={() => setEnvReady(true)}
           />
           {envReady && <RunConsole repositoryId={repositoryId} />}
-          <InstrumentationPanel repositoryId={repositoryId} />
 
           {/* Instrumentation flow */}
           <InstrumentationPanel repositoryId={repositoryId} />

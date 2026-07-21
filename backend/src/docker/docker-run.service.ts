@@ -2,21 +2,36 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { getIO } from "../config/socket.js";
 import { RunModel } from "../models/run.model.js";
+import { startMetricsLoop, stopMetricsLoop } from "../services/metrics-observer.service.js";
 
-const MAX_RUN_DURATION_MS = 5 * 60 * 1000; // 5 min hard cap
+const MAX_RUN_DURATION_MS = 30 * 60 * 1000;
 const CONTAINER_MEMORY = "512m";
 const CONTAINER_CPUS = "1";
-
-// How long to wait for the app to signal it's ready before giving up and
-// flipping to "running" anyway (better a false-positive than a stuck UI).
 const READINESS_TIMEOUT_MS = 30_000;
 const HEALTH_POLL_INTERVAL_MS = 500;
-
-// Fallback for apps with no discovered /health route — matches the common
-// "listening on ...", "server started", "running on ..." startup log lines.
 const READY_LOG_PATTERN = /(listening|running|started|ready)\b/i;
+
+// Custom image = node:20-alpine + OTel packages pre-installed under /otel,
+// kept separate from the cloned repo's own node_modules so we never touch
+// or collide with the user's dependency tree.
+const RUNNER_IMAGE = "axiom-runner:latest";
+const OTEL_RUNNER_DIR = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../otel-runner",
+);
+
+// Where the SigNoz OTel collector is reachable from *inside* a run
+// container. host-gateway works cross-platform on Docker 20.10+ when the
+// collector is running on the same host as this server (e.g. via the
+// SigNoz docker-compose stack bound to localhost:4318).
+const SIGNOZ_DOCKER_NETWORK =
+  process.env.SIGNOZ_DOCKER_NETWORK || "signoz-network";
+
+const SIGNOZ_OTLP_ENDPOINT =
+  process.env.SIGNOZ_OTLP_ENDPOINT || "http://ingester:4318/v1/traces";
 
 interface StartRunOptions {
   repositoryId: string;
@@ -24,7 +39,9 @@ interface StartRunOptions {
   localPath: string;
   envVars: Record<string, string>;
   appPort: number;
-  healthCheckPath?: string; // e.g. "/health", if discovered in the repo's routes
+  serviceName: string; // used as OTEL_SERVICE_NAME — must match what
+  // signoz-observability.service.ts queries by
+  healthCheckPath?: string;
 }
 
 export async function startDockerRun({
@@ -33,6 +50,7 @@ export async function startDockerRun({
   localPath,
   envVars,
   appPort,
+  serviceName,
   healthCheckPath,
 }: StartRunOptions): Promise<string> {
   const run = await RunModel.create({
@@ -44,13 +62,14 @@ export async function startDockerRun({
   const runId = run._id.toString();
   const containerName = `axiom-run-${runId}`;
 
-  // Fire-and-forget — the route handler responds immediately with runId.
   void executeRun({
     runId,
+    repositoryId,
     containerName,
     localPath,
     envVars,
     appPort,
+    serviceName,
     healthCheckPath,
   }).catch(async (err) => {
     console.error(`Run ${runId} failed:`, err);
@@ -60,6 +79,9 @@ export async function startDockerRun({
       finishedAt: new Date(),
     });
     getIO().to(`run:${runId}`).emit("run:status", { runId, status: "error" });
+    getIO()
+      .to(`repo:${repositoryId}`)
+      .emit("run:status", { runId, status: "error" });
   });
 
   return runId;
@@ -72,50 +94,72 @@ async function pollHealthCheck(
   while (Date.now() < deadline) {
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(1000) });
-      // Any response at all — even a 404 or 500 — means something is bound
-      // to the port and answering HTTP. That's "ready" for our purposes;
-      // app-level errors are the user's problem to see in the logs, not
-      // ours to gate readiness on.
       if (res) return true;
     } catch {
-      // Not up yet, or port not bound — keep polling.
+      // not up yet
     }
-    await new Promise((resolve) =>
-      setTimeout(resolve, HEALTH_POLL_INTERVAL_MS),
-    );
+    await new Promise((r) => setTimeout(r, HEALTH_POLL_INTERVAL_MS));
   }
   return false;
 }
 
 async function executeRun({
   runId,
+  repositoryId,
   containerName,
   localPath,
   envVars,
   appPort,
+  serviceName,
   healthCheckPath,
 }: {
   runId: string;
+  repositoryId: string;
   containerName: string;
   localPath: string;
   envVars: Record<string, string>;
   appPort: number;
+  serviceName: string;
   healthCheckPath?: string;
 }) {
   const io = getIO();
   const tmpDir = path.join(os.tmpdir(), "axiom-runs", runId);
   const envFilePath = path.join(os.tmpdir(), "axiom-runs", `${runId}.env`);
 
+  const emitBoth = (event: string, payload: object) => {
+    io.to(`run:${runId}`).emit(event, payload);
+    io.to(`repo:${repositoryId}`).emit(event, payload);
+  };
+
+  const emitServiceLog = (stream: "stdout" | "stderr", chunk: string) => {
+    io.to(`repo:${repositoryId}`).emit("service:log", {
+      repositoryId,
+      stream,
+      chunk,
+      timestamp: Date.now(),
+    });
+  };
+
   await fs.mkdir(path.dirname(tmpDir), { recursive: true });
   await fs.cp(localPath, tmpDir, { recursive: true });
 
-  const envFileContents = Object.entries(envVars)
+  // Merge the user's own env vars with the OTel bootstrap vars. NODE_OPTIONS
+  // gets inherited by whatever `node` process npm's start script spawns,
+  // regardless of the app's own entrypoint or bundler.
+  const fullEnv: Record<string, string> = {
+    ...envVars,
+    OTEL_SERVICE_NAME: serviceName,
+    OTEL_EXPORTER_OTLP_ENDPOINT: SIGNOZ_OTLP_ENDPOINT,
+    OTEL_LOG_LEVEL: "debug", // TEMP — remove once export path is confirmed working
+  };
+
+  const envFileContents = Object.entries(fullEnv)
     .map(([key, value]) => `${key}=${value}`)
     .join("\n");
   await fs.writeFile(envFilePath, envFileContents, { mode: 0o600 });
 
   await RunModel.findByIdAndUpdate(runId, { status: "installing" });
-  io.to(`run:${runId}`).emit("run:status", { runId, status: "installing" });
+  emitBoth("run:status", { runId, status: "installing" });
 
   const dockerArgs = [
     "run",
@@ -132,6 +176,8 @@ async function executeRun({
     "ALL",
     "--security-opt",
     "no-new-privileges",
+    "--network",
+    SIGNOZ_DOCKER_NETWORK, // <-- replaces the --add-host line
     "-p",
     `${appPort}:${appPort}`,
     "--env-file",
@@ -140,10 +186,10 @@ async function executeRun({
     `${tmpDir}:/app`,
     "-w",
     "/app",
-    "node:20-alpine",
+    RUNNER_IMAGE,
     "sh",
     "-c",
-    "npm install && (npm run build --if-present || true) && npm start",
+    "npm install && (npm run build --if-present || true) && NODE_OPTIONS='--require /otel/tracing.js' npm start",
   ];
 
   const child = spawn("docker", dockerArgs);
@@ -157,12 +203,10 @@ async function executeRun({
     if (readyEmitted) return;
     readyEmitted = true;
     await RunModel.findByIdAndUpdate(runId, { status: "running" });
-    io.to(`run:${runId}`).emit("run:status", { runId, status: "running" });
+    emitBoth("run:status", { runId, status: "running" });
+    startMetricsLoop(repositoryId, containerName, serviceName);
   };
 
-  // Readiness path A: poll the discovered health endpoint if we have one —
-  // this is the strongest signal since it confirms the port is actually
-  // bound and answering, not just that a log line looked promising.
   if (healthCheckPath) {
     void pollHealthCheck(
       `http://localhost:${appPort}${healthCheckPath}`,
@@ -174,67 +218,75 @@ async function executeRun({
 
   child.stdout.on("data", (chunk) => {
     const text = chunk.toString();
-    io.to(`run:${runId}`).emit("run:log", {
+
+    emitBoth("run:log", {
       runId,
       stream: "stdout",
       chunk: text,
     });
 
-    // Readiness path B: no health route discovered — fall back to log
-    // pattern matching. Skipped entirely if we're already polling /health.
+    emitServiceLog("stdout", text);
+
     if (!healthCheckPath && READY_LOG_PATTERN.test(text)) {
       markReady();
     }
   });
 
   child.stderr.on("data", (chunk) => {
-    io.to(`run:${runId}`).emit("run:log", {
+    const text = chunk.toString();
+
+    emitBoth("run:log", {
       runId,
       stream: "stderr",
-      chunk: chunk.toString(),
+      chunk: text,
     });
+
+    emitServiceLog("stderr", text);
   });
 
-  // Fallback: if nothing confirmed readiness within the timeout, flip to
-  // "running" anyway rather than leaving the UI stuck on "installing"
-  // forever — an unusual startup log shouldn't block the whole flow.
   setTimeout(() => {
     if (!readyEmitted) markReady();
   }, READINESS_TIMEOUT_MS);
 
   child.on("close", async (exitCode) => {
     clearTimeout(killTimer);
+    stopMetricsLoop(repositoryId); 
     await RunModel.findByIdAndUpdate(runId, {
       status: exitCode === 0 ? "exited" : "error",
       exitCode,
       finishedAt: new Date(),
     });
-    io.to(`run:${runId}`).emit("run:status", {
+    emitBoth("run:status", {
       runId,
       status: exitCode === 0 ? "exited" : "error",
       exitCode,
     });
-
-    // Cleanup — never leave decrypted secrets or run copies on disk.
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     await fs.rm(envFilePath, { force: true }).catch(() => {});
   });
 }
 
-// Pulls the base image once at server boot so the first real run doesn't
-// pay the pull-time cost inline.
-export function pullBaseImage(): Promise<void> {
+// Builds the axiom-runner image (node:20-alpine + OTel bootstrap) once at
+// server boot, so runs don't pay the OTel-install cost inline. Replaces
+// the old pullBaseImage().
+export function buildRunnerImage(): Promise<void> {
   return new Promise((resolve, reject) => {
-    console.log("📦 Pulling node:20-alpine base image...");
-    const pull = spawn("docker", ["pull", "node:20-alpine"]);
-    pull.on("close", (code) => {
+    console.log("📦 Building axiom-runner image (OpenTelemetry bootstrap)...");
+    const build = spawn("docker", [
+      "build",
+      "-t",
+      RUNNER_IMAGE,
+      OTEL_RUNNER_DIR,
+    ]);
+    build.stdout.on("data", (d) => process.stdout.write(d));
+    build.stderr.on("data", (d) => process.stderr.write(d));
+    build.on("close", (code) => {
       if (code === 0) {
-        console.log("✅ Base image ready");
+        console.log("✅ axiom-runner image ready");
         resolve();
       } else {
-        reject(new Error(`docker pull exited with code ${code}`));
+        reject(new Error(`docker build exited with code ${code}`));
       }
     });
   });
 }
-  
