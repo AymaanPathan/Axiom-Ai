@@ -127,6 +127,15 @@ export async function startRun(repositoryId: string): Promise<RunState> {
   return res.data;
 }
 
+export async function stopRun(
+  repositoryId: string,
+): Promise<{ success: boolean; runId: string }> {
+  const { data } = await apiClient.post<{ success: boolean; runId: string }>(
+    `/repos/${repositoryId}/stop`,
+  );
+  return data;
+}
+
 /** POST /repos/:id/traffic — generate real traffic against one route */
 export async function generateTraffic(
   repositoryId: string,

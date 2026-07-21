@@ -1,38 +1,24 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import {
-  Area,
-  AreaChart,
-  CartesianGrid,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
+  Area, AreaChart, CartesianGrid, Line, LineChart,
+  ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import {
-  getEndpointMetrics,
-  getMetricHistory,
-  getRecentErrors,
-  getRecentTraces,
-  getServiceHealth,
-  getSystemStatus,
-  signozServiceUrl,
-  signozTraceUrl,
-  type EndpointMetric,
-  type ErrorEvent,
-  type ServiceHealth,
-  type SystemStatus,
-  type TraceSummary,
+  getEndpointMetrics, getMetricHistory, getRecentErrors, getRecentTraces,
+  getServiceHealth, getSystemStatus, signozServiceUrl, signozTraceUrl,
+  type EndpointMetric, type ErrorEvent, type ServiceHealth,
+  type SystemStatus, type TraceSummary,
 } from "../api/observability";
 import { useServiceObserver } from "../hooks/useServiceObserver";
+import { startRun, stopRun } from "../api/repos";
 
 const MONO = "'Berkeley Mono', ui-monospace, monospace";
 const POLL_MS = 10_000;
 const SIGNOZ_BLUE = "#4c9aff";
 
 type Section = "overview" | "logs" | "traces" | "errors" | "infra";
+type ContainerState = "running" | "stopping" | "stopped" | "starting";
 
 const SECTIONS: { key: Section; label: string }[] = [
   { key: "overview", label: "Overview" },
@@ -41,6 +27,12 @@ const SECTIONS: { key: Section; label: string }[] = [
   { key: "errors", label: "Errors" },
   { key: "infra", label: "Infra" },
 ];
+
+const BOOT_STEPS = [
+  { key: "starting", label: "Starting container" },
+  { key: "installing", label: "Installing dependencies & building" },
+  { key: "running", label: "Service is live" },
+] as const;
 
 export default function ObservabilityDashboard() {
   const { repositoryId = "" } = useParams<{ repositoryId: string }>();
@@ -51,22 +43,79 @@ export default function ObservabilityDashboard() {
   const [traces, setTraces] = useState<TraceSummary[]>([]);
   const [errors, setErrors] = useState<ErrorEvent[]>([]);
 
-  const { connected, logs, latestMetric, metricHistory, seedMetricHistory } =
-    useServiceObserver(repositoryId || null);
+  const {
+    connected, logs, latestMetric, metricHistory, seedMetricHistory,
+    bootLogs, runStatus, trackRun,
+  } = useServiceObserver(repositoryId || null);
 
-  // Backfill charts once, then let the socket carry live points.
+  const [containerState, setContainerState] = useState<ContainerState>("running");
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [startupModalOpen, setStartupModalOpen] = useState(false);
+  const [startupError, setStartupError] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ kind: "error" | "success"; message: string } | null>(null);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  // Drive containerState off the *real* run status coming from the socket,
+  // not an optimistic guess. This is what fixes the "instant" start.
+  useEffect(() => {
+    if (!runStatus) return;
+    if (runStatus.status === "starting" || runStatus.status === "installing") {
+      setContainerState("starting");
+    } else if (runStatus.status === "running") {
+      setContainerState("running");
+      setToast({ kind: "success", message: "Container is up and running." });
+      // give the user a beat to see the final checkmark before closing
+      setTimeout(() => setStartupModalOpen(false), 900);
+    } else if (runStatus.status === "error") {
+      setContainerState("stopped");
+      setStartupError("The container exited with an error while starting. See logs below.");
+    } else if (runStatus.status === "exited") {
+      setContainerState("stopped");
+    }
+  }, [runStatus]);
+
+  const handleStopConfirmed = async () => {
+    setConfirmOpen(false);
+    setContainerState("stopping");
+    try {
+      await stopRun(repositoryId);
+      setContainerState("stopped");
+      setToast({ kind: "success", message: "Container stopped and removed." });
+    } catch (err) {
+      console.error("Failed to stop run:", err);
+      setContainerState("running");
+      setToast({ kind: "error", message: "Failed to stop the container. Check the logs and try again." });
+    }
+  };
+
+  const handleStart = async () => {
+    setStartupError(null);
+    setContainerState("starting");
+    setStartupModalOpen(true);
+    try {
+      const { runId } = await startRun(repositoryId);
+      trackRun(runId); // now the hook starts attributing run:log/run:status to this run
+    } catch (err) {
+      console.error("Failed to start run:", err);
+      setContainerState("stopped");
+      setStartupModalOpen(false);
+      setToast({ kind: "error", message: "Failed to start the container. Check the logs and try again." });
+    }
+  };
+
   useEffect(() => {
     if (!repositoryId) return;
-    getMetricHistory(repositoryId, 15)
-      .then(seedMetricHistory)
-      .catch(() => {});
+    getMetricHistory(repositoryId, 15).then(seedMetricHistory).catch(() => {});
   }, [repositoryId]);
 
-  // Health + system status: cheap, always poll regardless of active tab.
   useEffect(() => {
     if (!repositoryId) return;
     let inFlight = false;
-
     const tick = async () => {
       if (inFlight) return;
       inFlight = true;
@@ -81,28 +130,21 @@ export default function ObservabilityDashboard() {
         inFlight = false;
       }
     };
-
     tick();
     const interval = setInterval(tick, POLL_MS);
     return () => clearInterval(interval);
   }, [repositoryId]);
 
-  // Section-scoped polling — only fetch what's currently visible.
-  // Endpoints is fetched regardless of section since Overview now needs
-  // it for the "Active Endpoints" count.
   useEffect(() => {
     if (!repositoryId) return;
     let inFlight = false;
-
     const fetchers: Partial<Record<Section, () => Promise<void>>> = {
-      overview: async () =>
-        setEndpoints(await getEndpointMetrics(repositoryId)),
+      overview: async () => setEndpoints(await getEndpointMetrics(repositoryId)),
       traces: async () => setTraces(await getRecentTraces(repositoryId)),
       errors: async () => setErrors(await getRecentErrors(repositoryId)),
     };
     const fetcher = fetchers[section];
     if (!fetcher) return;
-
     const tick = async () => {
       if (inFlight) return;
       inFlight = true;
@@ -114,7 +156,6 @@ export default function ObservabilityDashboard() {
         inFlight = false;
       }
     };
-
     tick();
     const interval = setInterval(tick, POLL_MS);
     return () => clearInterval(interval);
@@ -127,20 +168,24 @@ export default function ObservabilityDashboard() {
   );
 
   return (
-    <div
-      className="px-8 py-6"
-      style={{ fontFamily: "'Inter', ui-sans-serif, system-ui, sans-serif" }}
-    >
+    <div className="px-8 py-6" style={{ fontFamily: "'Inter', ui-sans-serif, system-ui, sans-serif" }}>
       <div className="mb-5 flex items-center justify-between">
         <StatusStrip health={health} connected={connected} />
-        <a
-          href={signozServiceUrl(repositoryId)}
-          target="_blank"
-          rel="noreferrer"
-          className="rounded-lg border border-[#161718] px-3 py-1.5 text-[12px] text-[#a0a6b0] hover:text-white hover:border-[#2a2c2e]"
-        >
-          Open in SigNoz ↗
-        </a>
+        <div className="flex items-center gap-3">
+          <a
+            href={signozServiceUrl(repositoryId)}
+            target="_blank"
+            rel="noreferrer"
+            className="rounded-lg border border-[#161718] px-3 py-1.5 text-[12px] text-[#a0a6b0] hover:text-white hover:border-[#2a2c2e]"
+          >
+            Open in SigNoz ↗
+          </a>
+          <ContainerControl
+            state={containerState}
+            onStopRequested={() => setConfirmOpen(true)}
+            onStart={handleStart}
+          />
+        </div>
       </div>
 
       <nav className="mb-6 flex gap-1 border-b border-[#161718]">
@@ -177,6 +222,234 @@ export default function ObservabilityDashboard() {
       {section === "traces" && <TracesSection traces={traces} />}
       {section === "errors" && <ErrorsSection errors={errors} />}
       {section === "infra" && <InfraSection system={system} health={health} />}
+
+      {confirmOpen && (
+        <ConfirmDialog
+          title="Stop this container?"
+          description="This will stop and permanently delete the running container. You can start a new one afterward, but any unsaved in-memory state will be lost."
+          confirmLabel="Stop & delete"
+          onCancel={() => setConfirmOpen(false)}
+          onConfirm={handleStopConfirmed}
+        />
+      )}
+
+      {startupModalOpen && (
+        <StartupModal
+          status={runStatus?.status ?? "starting"}
+          logs={bootLogs}
+          error={startupError}
+          onClose={() => setStartupModalOpen(false)}
+          onRetry={() => {
+            setStartupModalOpen(false);
+            handleStart();
+          }}
+        />
+      )}
+
+      {toast && <Toast kind={toast.kind} message={toast.message} onClose={() => setToast(null)} />}
+    </div>
+  );
+}
+
+function ContainerControl({
+  state, onStopRequested, onStart,
+}: { state: ContainerState; onStopRequested: () => void; onStart: () => void }) {
+  if (state === "running") {
+    return (
+      <button
+        type="button"
+        onClick={onStopRequested}
+        className="rounded-lg border border-[#eb5757]/30 bg-[#eb5757]/10 px-3 py-1.5 text-[12px] font-medium text-[#eb5757] transition-colors hover:bg-[#eb5757]/20"
+      >
+        Stop Container
+      </button>
+    );
+  }
+  if (state === "stopping") {
+    return (
+      <span className="flex items-center gap-2 rounded-lg border border-[#161718] bg-[#0d0e0f] px-3 py-1.5 text-[12px] font-medium text-[#a0a6b0]">
+        <Spinner color="#eb5757" /> Stopping…
+      </span>
+    );
+  }
+  if (state === "starting") {
+    return (
+      <span className="flex items-center gap-2 rounded-lg border border-[#161718] bg-[#0d0e0f] px-3 py-1.5 text-[12px] font-medium text-[#a0a6b0]">
+        <Spinner color="#27a644" /> Starting…
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onStart}
+      className="rounded-lg border border-[#27a644]/30 bg-[#27a644]/10 px-3 py-1.5 text-[12px] font-medium text-[#27a644] transition-colors hover:bg-[#27a644]/20"
+    >
+      Start Container
+    </button>
+  );
+}
+
+function Spinner({ color }: { color: string }) {
+  return (
+    <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none" style={{ color }}>
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+    </svg>
+  );
+}
+
+function StartupModal({
+  status,
+  logs,
+  error,
+  onClose,
+  onRetry,
+}: {
+  status: "starting" | "installing" | "running" | "exited" | "error";
+  logs: { stream: "stdout" | "stderr"; chunk: string; timestamp: number }[];
+  error: string | null;
+  onClose: () => void;
+  onRetry: () => void;
+}) {
+  const stepIndex = BOOT_STEPS.findIndex((s) => s.key === status);
+  const failed = status === "error" || !!error;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+      <div className="w-full max-w-lg rounded-2xl border border-[#232527] bg-[#141516] p-5 shadow-2xl">
+        <div className="mb-4 flex items-center gap-2">
+          {!failed && <Spinner color="#4c9aff" />}
+          {failed && (
+            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-[#eb5757]/15 text-[12px] text-[#eb5757]">
+              !
+            </span>
+          )}
+          <h3 className="text-[14px] font-medium text-white">
+            {failed ? "Startup failed" : "Starting container…"}
+          </h3>
+        </div>
+
+        {/* Step tracker */}
+        <div className="mb-4 flex flex-col gap-2">
+          {BOOT_STEPS.map((step, i) => {
+            const done = !failed && stepIndex > i;
+            const active = !failed && stepIndex === i;
+            return (
+              <div key={step.key} className="flex items-center gap-2 text-[12.5px]">
+                <span
+                  className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px]"
+                  style={{
+                    background: done
+                      ? "#27a64422"
+                      : active
+                        ? "#4c9aff22"
+                        : "#1c1d1e",
+                    color: done ? "#27a644" : active ? "#4c9aff" : "#4c4f54",
+                  }}
+                >
+                  {done ? "✓" : i + 1}
+                </span>
+                <span className={active ? "text-white" : done ? "text-[#a0a6b0]" : "text-[#4c4f54]"}>
+                  {step.label}
+                </span>
+                {active && <Spinner color="#4c9aff" />}
+              </div>
+            );
+          })}
+        </div>
+
+        {error && (
+          <p className="mb-3 rounded-lg border border-[#eb5757]/30 bg-[#eb5757]/10 px-3 py-2 text-[12px] text-[#f0b8b8]">
+            {error}
+          </p>
+        )}
+
+        {/* Live boot logs */}
+        <div
+          className="max-h-56 overflow-y-auto rounded-xl border border-[#161718] bg-[#0d0e0f] px-3 py-2 text-[11.5px] leading-[1.6]"
+          style={{ fontFamily: MONO }}
+        >
+          {logs.length === 0 && (
+            <p className="text-[#4c4f54]">Waiting for container output…</p>
+          )}
+          {logs.map((line, i) => (
+            <pre
+              key={i}
+              className={`whitespace-pre-wrap ${line.stream === "stderr" ? "text-[#eb5757]" : "text-[#d0d6e0]"}`}
+            >
+              {line.chunk}
+            </pre>
+          ))}
+        </div>
+
+        <div className="mt-4 flex justify-end gap-2">
+          {failed ? (
+            <>
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-lg border border-[#232527] px-3 py-1.5 text-[12px] text-[#a0a6b0] hover:text-white"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                onClick={onRetry}
+                className="rounded-lg bg-[#4c9aff] px-3 py-1.5 text-[12px] font-medium text-white hover:bg-[#3d87e6]"
+              >
+                Retry
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg border border-[#232527] px-3 py-1.5 text-[12px] text-[#a0a6b0] hover:text-white"
+            >
+              Run in background
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConfirmDialog({
+  title, description, confirmLabel, onCancel, onConfirm,
+}: {
+  title: string; description: string; confirmLabel: string;
+  onCancel: () => void; onConfirm: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onCancel}>
+      <div className="w-full max-w-sm rounded-2xl border border-[#232527] bg-[#141516] p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-2 flex items-center gap-2">
+          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-[#eb5757]/15 text-[#eb5757]">!</span>
+          <h3 className="text-[14px] font-medium text-white">{title}</h3>
+        </div>
+        <p className="mb-5 text-[12.5px] leading-[1.6] text-[#a0a6b0]">{description}</p>
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={onCancel} className="rounded-lg border border-[#232527] px-3 py-1.5 text-[12px] text-[#a0a6b0] hover:text-white">Cancel</button>
+          <button type="button" onClick={onConfirm} className="rounded-lg bg-[#eb5757] px-3 py-1.5 text-[12px] font-medium text-white hover:bg-[#d94848]">{confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Toast({ kind, message, onClose }: { kind: "error" | "success"; message: string; onClose: () => void }) {
+  const isError = kind === "error";
+  return (
+    <div className="fixed bottom-5 right-5 z-50">
+      <div className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-[12.5px] shadow-xl ${
+        isError ? "border-[#eb5757]/30 bg-[#1c1010] text-[#f0b8b8]" : "border-[#27a644]/30 bg-[#0f1a10] text-[#b8e6c0]"
+      }`}>
+        <span>{isError ? "⚠" : "✓"}</span>
+        <span>{message}</span>
+        <button type="button" onClick={onClose} className="ml-2 text-[#62666d] hover:text-white">✕</button>
+      </div>
     </div>
   );
 }
@@ -241,7 +514,6 @@ function OverviewSection({
 
   return (
     <div className="flex flex-col gap-6">
-      {/* SigNoz-derived — this is what judges should see first */}
       <div>
         <SectionHeader title="Service Health" badge="Powered by SigNoz" />
         <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
@@ -272,34 +544,15 @@ function OverviewSection({
                 <XAxis dataKey="time" stroke="#4c4f54" fontSize={10} />
                 <YAxis stroke="#4c4f54" fontSize={10} />
                 <Tooltip contentStyle={tooltipStyle} />
-                <Line
-                  type="monotone"
-                  dataKey="p50"
-                  stroke="#62666d"
-                  dot={false}
-                  strokeWidth={1.5}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="p95"
-                  stroke={SIGNOZ_BLUE}
-                  dot={false}
-                  strokeWidth={1.5}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="p99"
-                  stroke="#eb5757"
-                  dot={false}
-                  strokeWidth={1.5}
-                />
+                <Line type="monotone" dataKey="p50" stroke="#62666d" dot={false} strokeWidth={1.5} />
+                <Line type="monotone" dataKey="p95" stroke={SIGNOZ_BLUE} dot={false} strokeWidth={1.5} />
+                <Line type="monotone" dataKey="p99" stroke="#eb5757" dot={false} strokeWidth={1.5} />
               </LineChart>
             </ResponsiveContainer>
           </ChartCard>
         </div>
       </div>
 
-      {/* Docker-derived — demoted below the fold */}
       <div>
         <SectionHeader title="Infrastructure" />
         <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
@@ -320,20 +573,8 @@ function OverviewSection({
                 <XAxis dataKey="time" stroke="#4c4f54" fontSize={10} />
                 <YAxis stroke="#4c4f54" fontSize={10} />
                 <Tooltip contentStyle={tooltipStyle} />
-                <Area
-                  type="monotone"
-                  dataKey="cpu"
-                  name="CPU %"
-                  stroke={SIGNOZ_BLUE}
-                  fill={`${SIGNOZ_BLUE}22`}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="memory"
-                  name="Mem MB"
-                  stroke="#27a644"
-                  fill="#27a64422"
-                />
+                <Area type="monotone" dataKey="cpu" name="CPU %" stroke={SIGNOZ_BLUE} fill={`${SIGNOZ_BLUE}22`} />
+                <Area type="monotone" dataKey="memory" name="Mem MB" stroke="#27a644" fill="#27a64422" />
               </AreaChart>
             </ResponsiveContainer>
           </ChartCard>
@@ -418,10 +659,7 @@ function TracesSection({ traces }: { traces: TraceSummary[] }) {
               <td className="px-4 py-2">
                 <span className="text-[#4c9aff]">{t.method}</span> {t.routePath}
               </td>
-              <td
-                className="px-4 py-2 text-[#62666d]"
-                style={{ fontFamily: MONO }}
-              >
+              <td className="px-4 py-2 text-[#62666d]" style={{ fontFamily: MONO }}>
                 {t.traceId.slice(0, 12)}…
               </td>
               <td className="px-4 py-2 text-right" style={{ fontFamily: MONO }}>
@@ -495,8 +733,6 @@ function ErrorsSection({ errors }: { errors: ErrorEvent[] }) {
   );
 }
 
-
-
 function InfraSection({
   system,
   health,
@@ -506,14 +742,8 @@ function InfraSection({
 }) {
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-      <InfraCard
-        label="Container"
-        status={system?.container.status ?? "unknown"}
-      >
-        <div
-          className="mt-2 space-y-1 text-[12px] text-[#62666d]"
-          style={{ fontFamily: MONO }}
-        >
+      <InfraCard label="Container" status={system?.container.status ?? "unknown"}>
+        <div className="mt-2 space-y-1 text-[12px] text-[#62666d]" style={{ fontFamily: MONO }}>
           <div>{system?.container.image ?? "—"}</div>
           <div>port {system?.container.port ?? "—"}</div>
         </div>

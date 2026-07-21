@@ -1,32 +1,27 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getIO } from "../config/socket.js";
 import { RunModel } from "../models/run.model.js";
-import { startMetricsLoop, stopMetricsLoop } from "../services/metrics-observer.service.js";
+import {
+  startMetricsLoop,
+  stopMetricsLoop,
+} from "../services/metrics-observer.service.js";
 
-const MAX_RUN_DURATION_MS = 60 * 60 * 1000;
 const CONTAINER_MEMORY = "512m";
 const CONTAINER_CPUS = "1";
 const READINESS_TIMEOUT_MS = 30_000;
 const HEALTH_POLL_INTERVAL_MS = 500;
 const READY_LOG_PATTERN = /(listening|running|started|ready)\b/i;
 
-// Custom image = node:20-alpine + OTel packages pre-installed under /otel,
-// kept separate from the cloned repo's own node_modules so we never touch
-// or collide with the user's dependency tree.
 const RUNNER_IMAGE = "axiom-runner:latest";
 const OTEL_RUNNER_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../otel-runner",
 );
 
-// Where the SigNoz OTel collector is reachable from *inside* a run
-// container. host-gateway works cross-platform on Docker 20.10+ when the
-// collector is running on the same host as this server (e.g. via the
-// SigNoz docker-compose stack bound to localhost:4318).
 const SIGNOZ_DOCKER_NETWORK =
   process.env.SIGNOZ_DOCKER_NETWORK || "signoz-network";
 
@@ -39,10 +34,20 @@ interface StartRunOptions {
   localPath: string;
   envVars: Record<string, string>;
   appPort: number;
-  serviceName: string; // used as OTEL_SERVICE_NAME — must match what
-  // signoz-observability.service.ts queries by
+  serviceName: string;
   healthCheckPath?: string;
 }
+
+// Tracks runs this server process actually spawned, so /stop can signal
+// the right child process and container without re-deriving state from
+// the DB. Cleared automatically when the container exits on its own.
+interface ActiveRun {
+  child: ChildProcessWithoutNullStreams;
+  containerName: string;
+  repositoryId: string;
+  manualStop: boolean;
+}
+const activeRuns = new Map<string, ActiveRun>();
 
 export async function startDockerRun({
   repositoryId,
@@ -85,6 +90,24 @@ export async function startDockerRun({
   });
 
   return runId;
+}
+
+// Manually stop (and, since containers run with --rm, delete) a run's
+// container. Only works for runs this server process spawned — if the
+// server restarted since the run started, activeRuns won't have it, and
+// the caller gets `false` back so the route can report a clear error
+// instead of hanging.
+export async function stopDockerRun(runId: string): Promise<boolean> {
+  const entry = activeRuns.get(runId);
+  if (!entry) return false;
+
+  entry.manualStop = true;
+  await new Promise<void>((resolve) => {
+    const kill = spawn("docker", ["kill", entry.containerName]);
+    kill.on("close", () => resolve());
+    kill.on("error", () => resolve()); // container may already be gone
+  });
+  return true;
 }
 
 async function pollHealthCheck(
@@ -143,9 +166,6 @@ async function executeRun({
   await fs.mkdir(path.dirname(tmpDir), { recursive: true });
   await fs.cp(localPath, tmpDir, { recursive: true });
 
-  // Merge the user's own env vars with the OTel bootstrap vars. NODE_OPTIONS
-  // gets inherited by whatever `node` process npm's start script spawns,
-  // regardless of the app's own entrypoint or bundler.
   const fullEnv: Record<string, string> = {
     ...envVars,
     OTEL_SERVICE_NAME: serviceName,
@@ -177,7 +197,7 @@ async function executeRun({
     "--security-opt",
     "no-new-privileges",
     "--network",
-    SIGNOZ_DOCKER_NETWORK, // <-- replaces the --add-host line
+    SIGNOZ_DOCKER_NETWORK,
     "-p",
     `${appPort}:${appPort}`,
     "--env-file",
@@ -194,9 +214,12 @@ async function executeRun({
 
   const child = spawn("docker", dockerArgs);
 
-  const killTimer = setTimeout(() => {
-    spawn("docker", ["kill", containerName]);
-  }, MAX_RUN_DURATION_MS);
+  activeRuns.set(runId, {
+    child,
+    containerName,
+    repositoryId,
+    manualStop: false,
+  });
 
   let readyEmitted = false;
   const markReady = async () => {
@@ -249,26 +272,29 @@ async function executeRun({
   }, READINESS_TIMEOUT_MS);
 
   child.on("close", async (exitCode) => {
-    clearTimeout(killTimer);
-    stopMetricsLoop(repositoryId); 
+    const wasManualStop = activeRuns.get(runId)?.manualStop ?? false;
+    activeRuns.delete(runId);
+    stopMetricsLoop(repositoryId);
+
+    // A manual stop always reports "exited" (expected), not "error" —
+    // even though `docker kill` produces a non-zero exit code.
+    const status = wasManualStop
+      ? "exited"
+      : exitCode === 0
+        ? "exited"
+        : "error";
+
     await RunModel.findByIdAndUpdate(runId, {
-      status: exitCode === 0 ? "exited" : "error",
+      status,
       exitCode,
       finishedAt: new Date(),
     });
-    emitBoth("run:status", {
-      runId,
-      status: exitCode === 0 ? "exited" : "error",
-      exitCode,
-    });
+    emitBoth("run:status", { runId, status, exitCode });
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     await fs.rm(envFilePath, { force: true }).catch(() => {});
   });
 }
 
-// Builds the axiom-runner image (node:20-alpine + OTel bootstrap) once at
-// server boot, so runs don't pay the OTel-install cost inline. Replaces
-// the old pullBaseImage().
 export function buildRunnerImage(): Promise<void> {
   return new Promise((resolve, reject) => {
     console.log("📦 Building axiom-runner image (OpenTelemetry bootstrap)...");

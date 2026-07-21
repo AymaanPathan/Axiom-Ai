@@ -9,7 +9,7 @@ import { parseRoutes } from "../parsing/route-parser.js";
 import { RepositoryModel } from "../models/repository.model.js";
 import { detectRequiredEnvVars } from "../parsing/env-detect.js";
 import { encryptEnvValue, decryptEnvValue } from "../utils/env-crypto.js";
-import { startDockerRun } from "../docker/docker-run.service.js";
+import { startDockerRun, stopDockerRun } from "../docker/docker-run.service.js";
 import { RunModel } from "../models/run.model.js";
 import { detectAppPort } from "../parsing/detect-port.js";
 import { resolveConnectedFiles } from "../parsing/connectedFiles.service.js";
@@ -449,6 +449,35 @@ router.post("/:id/run", requireAuth, async (req: AuthedRequest, res) => {
   });
 
   res.status(202).json({ runId, status: "starting", port: repository.appPort });
+});
+
+// POST /repos/:id/stop — stop (and delete, since runs use --rm) the
+// repository's currently active container.
+router.post("/:id/stop", requireAuth, async (req: AuthedRequest, res) => {
+  const repository = await RepositoryModel.findOne({
+    _id: req.params.id,
+    userId: req.user!.githubId,
+  });
+  if (!repository)
+    return res.status(404).json({ error: "Repository not found" });
+
+  const activeRun = await RunModel.findOne({
+    repositoryId: req.params.id,
+    status: { $in: ["starting", "installing", "running"] },
+  }).sort({ createdAt: -1 });
+
+  if (!activeRun) {
+    return res.status(404).json({ error: "No active run for this repository" });
+  }
+
+  const stopped = await stopDockerRun(activeRun._id.toString());
+  if (!stopped) {
+    return res.status(409).json({
+      error: "Run is not tracked by this server instance (may have restarted). Restart the run to stop it cleanly.",
+    });
+  }
+
+  res.json({ success: true, runId: activeRun._id.toString() });
 });
 
 // GET /repos/:id/runs/:runId — polling fallback / initial state before socket connects
