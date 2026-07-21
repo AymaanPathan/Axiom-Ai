@@ -1,19 +1,16 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useAppDispatch, useAppSelector } from "../store/hooks";
 import { fetchRepoDetail } from "../store/slices/reposSlice";
-import PipelineViz from "../components/PipeLineViz";
-import InstrumentationPanel from "../components/InstrumentalPanel";
+import ObservabilityLauncher from "../components/ObservabilityLauncher";
 import MissingEnvPanel from "../components/MissingEnvPanel";
-import RunConsole from "../components/RunConsole";
-import { useState } from "react";
 
 const METHOD_COLOR: Record<string, string> = {
-  GET: "text-[#4c9aff]",
-  POST: "text-[#27a644]",
-  PUT: "text-[#e4f222]",
-  PATCH: "text-[#e4f222]",
-  DELETE: "text-[#eb5757]",
+  GET: "text-[#5aa6ff]",
+  POST: "text-[#3ecf5f]",
+  PUT: "text-[#f0e63f]",
+  PATCH: "text-[#f0e63f]",
+  DELETE: "text-[#f27272]",
 };
 
 export default function RepoDetail() {
@@ -21,14 +18,10 @@ export default function RepoDetail() {
   const navigate = useNavigate();
   const dispatch = useAppDispatch();
   const [envReady, setEnvReady] = useState(false);
+  const [launched, setLaunched] = useState(false);
 
   const repo = useAppSelector((s) =>
     repositoryId ? s.repos.byId[repositoryId] : undefined,
-  );
-  const instrumentationStatus = useAppSelector((s) =>
-    repositoryId
-      ? s.instrumentation.byRepositoryId[repositoryId]?.status
-      : undefined,
   );
 
   useEffect(() => {
@@ -41,154 +34,168 @@ export default function RepoDetail() {
 
   if (!repo) {
     return (
-      <div className="px-8 py-10">
-        <p className="text-[13px] text-[#62666d]">Loading repository…</p>
+      <div className="px-10 py-10">
+        <p className="text-[13px] text-[#9096a1]">Loading repository…</p>
       </div>
     );
   }
 
-  const instrumented = instrumentationStatus === "ready";
-
   return (
-    <div className="px-8 py-10">
+    <div className="w-full px-10 py-10">
       <button
         type="button"
         onClick={() => navigate("/workspace")}
-        className="mb-6 text-[13px] text-[#62666d] transition-colors hover:text-white"
+        className="mb-8 flex items-center gap-1.5 text-[13px] font-medium text-[#9096a1] transition-colors hover:text-white"
       >
         ← Repositories
       </button>
 
+      {/* Header */}
       <div className="mb-8 flex items-start justify-between">
-        <div>
-          <h1 className="text-[28px] font-[510] leading-[1.13] tracking-[-0.012em] text-white">
-            📦 {repo.githubFullName.split("/")[1]}
-          </h1>
-          <p className="mt-1 text-[13px] text-[#62666d]">
-            {repo.framework === "express" ? "Express" : repo.framework} ·{" "}
-            {repo.routes.length} route{repo.routes.length === 1 ? "" : "s"}
-          </p>
+        <div className="flex items-center gap-4">
+          <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-[#2a2d33] bg-[#141518] text-[22px]">
+            📦
+          </div>
+          <div>
+            <h1 className="text-[30px] font-[560] leading-[1.1] tracking-[-0.015em] text-white">
+              {repo.githubFullName.split("/")[1]}
+            </h1>
+            <p className="mt-1 text-[13px] text-[#9096a1]">
+              {repo.githubFullName}
+            </p>
+          </div>
         </div>
         <span
-          className={`rounded-full border px-3 py-1 text-[12px] font-[510] ${
-            instrumented
-              ? "border-[#27a644]/30 bg-[#27a644]/10 text-[#27a644]"
-              : "border-[#23252a] bg-white/[0.03] text-[#8a8f98]"
+          className={`flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-[12px] font-[560] ${
+            launched
+              ? "border-[#3ecf5f]/30 bg-[#3ecf5f]/10 text-[#3ecf5f]"
+              : "border-[#2a2d33] bg-[#141518] text-[#c4c8d1]"
           }`}
         >
-          {instrumented ? "🟢 Instrumented" : "🟢 Ready"}
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${
+              launched ? "bg-[#3ecf5f]" : "bg-[#c4c8d1]"
+            }`}
+          />
+          {launched ? "Live" : "Ready"}
         </span>
       </div>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_280px]">
-        <div className="flex flex-col gap-6">
-          {/* Setup checklist */}
-          <div className="rounded-xl border border-[#23252a] bg-[#0f1011] p-5">
-            <div className="flex flex-col gap-2">
-              {[
-                "Repository cloned",
-                "Framework detected",
-                "Route graph generated",
-              ].map((item) => (
-                <div
-                  key={item}
-                  className="flex items-center gap-2 text-[13px] text-[#d0d6e0]"
-                >
-                  <span className="text-[#27a644]">✓</span>
-                  {item}
-                </div>
-              ))}
-            </div>
+      {/* Stat bar */}
+      <div className="mb-6 grid grid-cols-4 gap-4">
+        {[
+          {
+            label: "Framework",
+            value: repo.framework === "express" ? "Express" : repo.framework,
+          },
+          { label: "Routes", value: repo.routes.length },
+          { label: "Env Status", value: envReady ? "Configured" : "Pending" },
+          {
+            label: "Observability",
+            value: launched ? "Live" : "Not started",
+          },
+        ].map((stat) => (
+          <div
+            key={stat.label}
+            className="rounded-xl border border-[#2a2d33] bg-[#141518] px-5 py-4"
+          >
+            <p className="text-[11px] font-medium uppercase tracking-wide text-[#7a808c]">
+              {stat.label}
+            </p>
+            <p className="mt-1.5 text-[16px] font-[560] text-white">
+              {stat.value}
+            </p>
           </div>
+        ))}
+      </div>
 
-          <div className="rounded-xl border border-[#23252a] bg-[#0f1011] p-5">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-sm font-medium text-white">
-                  Service Observability
-                </h3>
-
-                <p className="mt-1 text-xs text-[#62666d]">
-                  Monitor logs, traces, metrics, CPU, memory and endpoint
-                  activity.
-                </p>
-              </div>
-
-              <Link
-                to={`/workspace/repos/${repositoryId}/observability`}
-                className="rounded-lg bg-[#4c9aff] px-4 py-2 text-sm text-white hover:bg-[#3d8af5]"
-              >
-                Open Dashboard →
-              </Link>
-            </div>
-          </div>
-
-          {/* Routes */}
-          <div className="rounded-xl border border-[#23252a] bg-[#0f1011]">
-            <div className="border-b border-[#23252a] px-5 py-3">
-              <span
-                className="text-[11px] text-[#62666d]"
-                style={{
-                  fontFamily: "'Berkeley Mono', ui-monospace, monospace",
-                }}
-              >
-                Routes
-              </span>
-            </div>
-            <div className="flex flex-col divide-y divide-[#161718]">
-              {repo.routes.map((route, index) => (
-                <Link
-                  key={`${route.method}-${route.routePath}-${route.line}`}
-                  to={`/workspace/repos/${repositoryId}/endpoints/${index}`}
-                  className="flex items-center gap-4 px-5 py-3 transition-colors hover:bg-white/[0.02]"
-                  style={{
-                    fontFamily: "'Berkeley Mono', ui-monospace, monospace",
-                  }}
-                >
-                  <span
-                    className={`w-14 shrink-0 text-[12px] font-[510] ${
-                      METHOD_COLOR[route.method] ?? "text-[#8a8f98]"
-                    }`}
-                  >
-                    {route.method}
-                  </span>
-                  <span className="text-[13px] text-[#d0d6e0]">
-                    {route.routePath}
-                  </span>
-                  <span className="ml-auto shrink-0 text-[11px] text-[#4c4f54]">
-                    {route.file}:{route.line}
-                  </span>
-                </Link>
-              ))}
-            </div>
-          </div>
-          <MissingEnvPanel
-            repositoryId={repositoryId}
-            onAllSet={() => setEnvReady(true)}
-          />
-          {envReady && <RunConsole repositoryId={repositoryId} />}
-
-          {/* Instrumentation flow */}
-          <InstrumentationPanel repositoryId={repositoryId} />
-        </div>
-
-        {/* Pipeline sidebar */}
-        <div>
-          <PipelineViz
-            routeCount={repo.routes.length}
-            instrumented={instrumented}
-          />
-          <p className="mt-4 text-[12px] leading-[1.5] text-[#62666d]">
-            Need another repo?{" "}
-            <Link
-              to="/workspace"
-              className="text-[#d0d6e0] underline decoration-dotted hover:text-white"
+      {/* Setup checklist */}
+      <div className="mb-6 rounded-xl border border-[#2a2d33] bg-[#141518] p-6">
+        <div className="flex flex-wrap gap-x-8 gap-y-3">
+          {[
+            "Repository cloned",
+            "Framework detected",
+            "Route graph generated",
+          ].map((item) => (
+            <div
+              key={item}
+              className="flex items-center gap-2 text-[13px] font-medium text-[#dde1e8]"
             >
-              Back to repositories
-            </Link>
-          </p>
+              <span className="flex h-4 w-4 items-center justify-center rounded-full bg-[#3ecf5f]/15 text-[10px] text-[#3ecf5f]">
+                ✓
+              </span>
+              {item}
+            </div>
+          ))}
         </div>
       </div>
+
+      {launched && (
+        <div className="mb-6 flex items-center justify-between rounded-xl border border-[#2a2d33] bg-[#141518] p-6">
+          <div>
+            <h3 className="text-[15px] font-[560] text-white">
+              Service Observability
+            </h3>
+            <p className="mt-1 text-[13px] text-[#9096a1]">
+              Monitor logs, traces, metrics, CPU, memory and endpoint activity.
+            </p>
+          </div>
+          <Link
+            to={`/workspace/repos/${repositoryId}/observability`}
+            className="shrink-0 rounded-lg bg-[#5aa6ff] px-5 py-2.5 text-[13px] font-[560] text-[#08090a] transition-opacity hover:opacity-90"
+          >
+            Open Dashboard →
+          </Link>
+        </div>
+      )}
+
+      {/* Routes */}
+      <div className="mb-6 rounded-xl border border-[#2a2d33] bg-[#141518]">
+        <div className="border-b border-[#2a2d33] px-6 py-4">
+          <span className="text-[13px] font-[560] text-white">Routes</span>
+          <span className="ml-2 text-[13px] text-[#7a808c]">
+            {repo.routes.length}
+          </span>
+        </div>
+        <div className="grid grid-cols-2">
+          {repo.routes.map((route) => (
+            <p
+              key={`${route.method}-${route.routePath}-${route.line}`}
+              className="flex items-center gap-4 border-b border-r border-[#1c1e22] px-6 py-4 transition-colors last:border-b-0 hover:bg-white/[0.03] [&:nth-child(2n)]:border-r-0"
+              style={{
+                fontFamily: "'Berkeley Mono', ui-monospace, monospace",
+              }}
+            >
+              <span
+                className={`w-14 shrink-0 text-[12px] font-[560] ${
+                  METHOD_COLOR[route.method] ?? "text-[#c4c8d1]"
+                }`}
+              >
+                {route.method}
+              </span>
+              <span className="text-[13px] text-[#dde1e8]">
+                {route.routePath}
+              </span>
+              <span className="ml-auto shrink-0 text-[11px] text-[#6b7078]">
+                {route.file}:{route.line}
+              </span>
+            </p>
+          ))}
+        </div>
+      </div>
+
+      <div className="mb-6">
+        <MissingEnvPanel
+          repositoryId={repositoryId}
+          onAllSet={() => setEnvReady(true)}
+        />
+      </div>
+
+      <ObservabilityLauncher
+        repositoryId={repositoryId}
+        envReady={envReady}
+        onLaunched={() => setLaunched(true)}
+      />
     </div>
   );
 }

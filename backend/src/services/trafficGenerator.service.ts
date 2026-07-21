@@ -1,3 +1,4 @@
+import { getIO } from "../config/socket.js";
 import { resolveConnectedFiles } from "../parsing/connectedFiles.service.js";
 
 export interface TrafficResult {
@@ -11,6 +12,7 @@ export interface TrafficResult {
 }
 
 interface GenerateTrafficOptions {
+  repositoryId: string; // NEW — needed to know which socket room to emit into
   appPort: number;
   method: string;
   routePath: string;
@@ -18,7 +20,14 @@ interface GenerateTrafficOptions {
   routeFile: string;
   routeLine: number;
   requestCount?: number;
-  errorInjectionRate?: number; // 0-1, fraction of requests sent with a deliberately broken body
+  errorInjectionRate?: number;
+}
+
+// ...guessValueForField / buildFillerBody unchanged...
+
+const DEBUG = process.env.SIGNOZ_DEBUG !== "false";
+function debugLog(...args: unknown[]): void {
+  if (DEBUG) console.log("[Traffic]", ...args);
 }
 
 // Rough, name-based guesses for a plausible value per detected body field.
@@ -43,7 +52,7 @@ function guessValueForField(field: string): unknown {
     lower.includes("count")
   )
     return 2;
-  if (lower.endsWith("id")) return "64b7f3f1c2a1d2e3f4a5b6c7"; // Mongo ObjectId-shaped
+  if (lower.endsWith("id")) return "64b7f3f1c2a1d2e3f4a5b6c7";
   if (lower.includes("name")) return "Test Item";
   return "test-value";
 }
@@ -54,18 +63,12 @@ function buildFillerBody(fields: string[]): Record<string, unknown> {
   return body;
 }
 
-const DEBUG = process.env.SIGNOZ_DEBUG !== "false";
-
-function debugLog(...args: unknown[]): void {
-  if (DEBUG) console.log("[Traffic]", ...args);
-}
-
 async function sendOneRequest(
   baseUrl: string,
   method: string,
   routePath: string,
   body?: Record<string, unknown>,
-): Promise<{ ok: boolean; status: number }> {
+): Promise<{ ok: boolean; status: number; responseBody: string | null }> {
   const url = `${baseUrl}${routePath}`;
   try {
     const res = await fetch(url, {
@@ -74,6 +77,15 @@ async function sendOneRequest(
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(5000),
     });
+    // Read the body so the live log can show *why* a request failed —
+    // this is what would have shown you the 400's actual error message
+    // instead of just the status code.
+    let responseBody: string | null = null;
+    try {
+      responseBody = (await res.text()).slice(0, 500);
+    } catch {
+      // ignore body-read failures
+    }
     debugLog(
       method,
       url,
@@ -81,22 +93,16 @@ async function sendOneRequest(
       res.status,
       body ? `body: ${JSON.stringify(body)}` : "(no body)",
     );
-    return { ok: res.ok, status: res.status };
+    return { ok: res.ok, status: res.status, responseBody };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     debugLog(method, url, "-> REQUEST FAILED:", message);
-    return { ok: false, status: 0 };
+    return { ok: false, status: 0, responseBody: message };
   }
 }
 
-/**
- * Sends real traffic to one route on a running container, so SigNoz has
- * actual spans to report on — not a single smoke-test request. Reuses the
- * connected-files resolver to detect the route's real request body fields
- * (same detection that powers the Request Schema panel) so POST/PUT/PATCH
- * traffic carries a realistic-shaped payload instead of an empty body.
- */
 export async function generateTrafficForRoute({
+  repositoryId,
   appPort,
   method,
   routePath,
@@ -108,11 +114,21 @@ export async function generateTrafficForRoute({
 }: GenerateTrafficOptions): Promise<TrafficResult> {
   const baseUrl = `http://localhost:${appPort}`;
   const windowStart = Date.now();
+  const io = getIO();
+  const room = `repo:${repositoryId}`;
 
-  debugLog(
-    `Starting burst: ${requestCount}x ${method} ${baseUrl}${routePath}`,
-    `(window starts ${new Date(windowStart).toISOString()})`,
-  );
+  const emitLog = (payload: object) => io.to(room).emit("traffic:log", payload);
+  const emitProgress = (payload: object) =>
+    io.to(room).emit("traffic:progress", payload);
+
+  debugLog(`Starting burst: ${requestCount}x ${method} ${baseUrl}${routePath}`);
+  emitProgress({
+    status: "starting",
+    method,
+    routePath,
+    total: requestCount,
+    sent: 0,
+  });
 
   let requestBodyFields: string[] = [];
   if (method !== "GET" && method !== "DELETE") {
@@ -123,12 +139,8 @@ export async function generateTrafficForRoute({
         routeLine,
       );
       requestBodyFields = resolved.requestBodyFields;
-      debugLog("Detected body fields for filler payloads:", requestBodyFields);
-    } catch (err) {
-      debugLog(
-        "Could not resolve body fields, sending bodyless requests:",
-        err instanceof Error ? err.message : String(err),
-      );
+    } catch {
+      // fall through bodyless
     }
   }
 
@@ -138,11 +150,10 @@ export async function generateTrafficForRoute({
   for (let i = 0; i < requestCount; i++) {
     const injectError =
       requestBodyFields.length > 0 && Math.random() < errorInjectionRate;
-
     const body =
       requestBodyFields.length > 0
         ? injectError
-          ? {} // missing required fields — a real validation/error response
+          ? {}
           : buildFillerBody(requestBodyFields)
         : undefined;
 
@@ -150,18 +161,43 @@ export async function generateTrafficForRoute({
     if (result.ok) successCount++;
     else errorCount++;
 
-    // Jitter between requests so this reads as traffic over a window,
-    // not one instant burst.
+    // NEW — this is the line that actually gives you visibility.
+    // Every single request, as it happens, streams to the frontend.
+    emitLog({
+      index: i + 1,
+      total: requestCount,
+      method,
+      routePath,
+      status: result.status,
+      ok: result.ok,
+      responseBody: result.ok ? null : result.responseBody,
+      timestamp: Date.now(),
+    });
+    emitProgress({
+      status: "running",
+      method,
+      routePath,
+      total: requestCount,
+      sent: i + 1,
+      successCount,
+      errorCount,
+    });
+
     await new Promise((resolve) =>
       setTimeout(resolve, 80 + Math.random() * 150),
     );
   }
 
   const windowEnd = Date.now();
-  debugLog(
-    `Burst finished: ${successCount} ok / ${errorCount} failed`,
-    `(window ${new Date(windowStart).toISOString()} .. ${new Date(windowEnd).toISOString()})`,
-  );
+  emitProgress({
+    status: "done",
+    method,
+    routePath,
+    total: requestCount,
+    sent: requestCount,
+    successCount,
+    errorCount,
+  });
 
   return {
     method,

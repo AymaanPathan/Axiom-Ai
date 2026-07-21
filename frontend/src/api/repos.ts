@@ -20,6 +20,7 @@ export interface ConnectedRepository {
   githubFullName: string;
   framework: string;
   routes: DiscoveredRoute[];
+  requiredEnvVars: string[];
 }
 
 export interface EnvStatus {
@@ -28,11 +29,49 @@ export interface EnvStatus {
   missing: string[];
 }
 
+export interface ConnectedFile {
+  path: string;
+  role: "route" | "controller" | "service" | "other";
+  content: string;
+  startLine: number;
+  endLine: number;
+  highlightLine?: number;
+}
+
+export interface ConnectedFilesResult {
+  files: ConnectedFile[];
+  requestBodyFields: string[];
+}
+
 export interface RunState {
   runId: string;
   status: "starting" | "installing" | "running" | "exited" | "error";
   exitCode?: number;
   port?: number;
+}
+
+export interface TrafficResult {
+  method: string;
+  routePath: string;
+  requestsSent: number;
+  successCount: number;
+  errorCount: number;
+  windowStart: number;
+  windowEnd: number;
+}
+
+export interface RouteTelemetry {
+  service: string;
+  method: string;
+  routePath: string;
+  window: { start: number; end: number };
+  requestCount: number;
+  errorCount: number;
+  errorRatePercent: number;
+  latencyMs: { p50: number; p95: number; p99: number; avg: number };
+  db: { avgDurationMs: number | null; callCount: number };
+  external: { avgDurationMs: number | null; callCount: number };
+  warnings: string[];
 }
 
 /** GET /repos — list the signed-in user's GitHub repositories */
@@ -56,12 +95,15 @@ export async function connectRepo(
 export async function getRepoDetail(
   repositoryId: string,
 ): Promise<ConnectedRepository> {
-  const { data } = await apiClient.get<{
-    githubFullName: string;
-    framework: string;
-    routes: DiscoveredRoute[];
-  }>(`/repos/${repositoryId}/routes`);
-  return { repositoryId, ...data };
+  const [{ data }, { data: env }] = await Promise.all([
+    apiClient.get<{
+      githubFullName: string;
+      framework: string;
+      routes: DiscoveredRoute[];
+    }>(`/repos/${repositoryId}/routes`),
+    apiClient.get<{ requiredEnvVars: string[] }>(`/repos/${repositoryId}/env`),
+  ]);
+  return { repositoryId, requiredEnvVars: env.requiredEnvVars, ...data };
 }
 
 export async function getEnvStatus(repositoryId: string): Promise<EnvStatus> {
@@ -75,7 +117,7 @@ export async function submitEnvVars(
 ): Promise<Pick<EnvStatus, "providedKeys" | "missing">> {
   const res = await apiClient.post<Pick<EnvStatus, "providedKeys" | "missing">>(
     `/repos/${repositoryId}/env`,
-    { envVars }
+    { envVars },
   );
   return res.data;
 }
@@ -83,4 +125,56 @@ export async function submitEnvVars(
 export async function startRun(repositoryId: string): Promise<RunState> {
   const res = await apiClient.post<RunState>(`/repos/${repositoryId}/run`);
   return res.data;
+}
+
+/** POST /repos/:id/traffic — generate real traffic against one route */
+export async function generateTraffic(
+  repositoryId: string,
+  routeIndex: number,
+  requestCount = 30,
+): Promise<TrafficResult> {
+  const { data } = await apiClient.post<TrafficResult>(
+    `/repos/${repositoryId}/traffic`,
+    { routeIndex, requestCount },
+  );
+  return data;
+}
+
+/** GET /repos/:id/telemetry — pull SigNoz numbers for a route over a window */
+export async function getTelemetry(
+  repositoryId: string,
+  routeIndex: number,
+  start: number,
+  end: number,
+  service?: string,
+): Promise<RouteTelemetry> {
+  const { data } = await apiClient.get<RouteTelemetry>(
+    `/repos/${repositoryId}/telemetry`,
+    { params: { routeIndex, start, end, ...(service ? { service } : {}) } },
+  );
+  return data;
+}
+
+export async function getExplanation(
+  repositoryId: string,
+  file: string,
+  line: number,
+): Promise<string> {
+  const { data } = await apiClient.get<{ explanation: string }>(
+    `/repos/${repositoryId}/explain`,
+    { params: { file, line } },
+  );
+  return data.explanation;
+}
+
+export async function getConnectedFiles(
+  repositoryId: string,
+  file: string,
+  line: number,
+): Promise<ConnectedFilesResult> {
+  const { data } = await apiClient.get<ConnectedFilesResult>(
+    `/repos/${repositoryId}/connected-files`,
+    { params: { file, line } },
+  );
+  return data;
 }

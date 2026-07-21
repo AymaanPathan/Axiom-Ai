@@ -7,7 +7,7 @@ import { getIO } from "../config/socket.js";
 import { RunModel } from "../models/run.model.js";
 import { startMetricsLoop, stopMetricsLoop } from "../services/metrics-observer.service.js";
 
-const MAX_RUN_DURATION_MS = 30 * 60 * 1000;
+const MAX_RUN_DURATION_MS = 60 * 60 * 1000;
 const CONTAINER_MEMORY = "512m";
 const CONTAINER_CPUS = "1";
 const READINESS_TIMEOUT_MS = 30_000;

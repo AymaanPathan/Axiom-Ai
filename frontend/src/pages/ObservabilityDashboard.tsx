@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import {
   Area,
   AreaChart,
@@ -181,12 +181,13 @@ export default function ObservabilityDashboard() {
           endpointsPreview={endpoints.slice(0, 5)}
           activeEndpointCount={activeEndpointCount}
           onViewAllEndpoints={() => setSection("endpoints")}
+          repositoryId={repositoryId}
         />
       )}
       {section === "logs" && <LogsSection logs={logs} />}
       {section === "traces" && <TracesSection traces={traces} />}
       {section === "errors" && <ErrorsSection errors={errors} />}
-      {section === "endpoints" && <EndpointsSection endpoints={endpoints} />}
+      {section === "endpoints" && <EndpointsSection endpoints={endpoints} repositoryId={repositoryId} />}
       {section === "infra" && <InfraSection system={system} health={health} />}
     </div>
   );
@@ -233,12 +234,14 @@ function OverviewSection({
   endpointsPreview,
   activeEndpointCount,
   onViewAllEndpoints,
+  repositoryId,
 }: {
   latest: ReturnType<typeof useServiceObserver>["latestMetric"];
   history: ReturnType<typeof useServiceObserver>["metricHistory"];
   endpointsPreview: EndpointMetric[];
   activeEndpointCount: number;
   onViewAllEndpoints: () => void;
+  repositoryId: string;
 }) {
   const chartData = history.map((m) => ({
     time: new Date(m.timestamp).toLocaleTimeString([], {
@@ -368,7 +371,10 @@ function OverviewSection({
             No traffic observed yet.
           </p>
         ) : (
-          <EndpointRows endpoints={endpointsPreview} />
+          <EndpointRows
+            endpoints={endpointsPreview}
+            repositoryId={repositoryId}
+          />
         )}
       </div>
     </div>
@@ -527,7 +533,13 @@ function ErrorsSection({ errors }: { errors: ErrorEvent[] }) {
   );
 }
 
-function EndpointsSection({ endpoints }: { endpoints: EndpointMetric[] }) {
+function EndpointsSection({
+  endpoints,
+  repositoryId,
+}: {
+  endpoints: EndpointMetric[];
+  repositoryId: string;
+}) {
   if (endpoints.length === 0) {
     return (
       <p className="text-[12px] text-[#4c4f54]">
@@ -537,7 +549,11 @@ function EndpointsSection({ endpoints }: { endpoints: EndpointMetric[] }) {
   }
   return (
     <div className="overflow-hidden rounded-xl border border-[#161718]">
-      <EndpointRows endpoints={endpoints} showHeader />
+      <EndpointRows
+        endpoints={endpoints}
+        showHeader
+        repositoryId={repositoryId}
+      />
     </div>
   );
 }
@@ -545,10 +561,14 @@ function EndpointsSection({ endpoints }: { endpoints: EndpointMetric[] }) {
 function EndpointRows({
   endpoints,
   showHeader,
+  repositoryId,
 }: {
   endpoints: EndpointMetric[];
   showHeader?: boolean;
+  repositoryId: string;
 }) {
+  const navigate = useNavigate();
+
   return (
     <table className="w-full text-[12px]">
       {showHeader && (
@@ -563,10 +583,13 @@ function EndpointRows({
         </thead>
       )}
       <tbody>
-        {endpoints.map((e) => (
+        {endpoints.map((e, i) => (
           <tr
             key={`${e.method}-${e.routePath}`}
-            className="border-b border-[#161718] last:border-0"
+            onClick={() =>
+              navigate(`/workspace/repos/${repositoryId}/endpoints/${i}`)
+            }
+            className="cursor-pointer border-b border-[#161718] last:border-0 hover:bg-[#131415]"
           >
             <td className="px-4 py-2">
               <span className="text-[#4c9aff]">{e.method}</span> {e.routePath}

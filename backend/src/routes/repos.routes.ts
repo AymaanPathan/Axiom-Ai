@@ -294,6 +294,7 @@ router.post("/:id/traffic", requireAuth, async (req: AuthedRequest, res) => {
 
   try {
     const result = await generateTrafficForRoute({
+      repositoryId: repository._id.toString(),
       appPort: repository.appPort,
       method: route.method,
       routePath: route.routePath,
