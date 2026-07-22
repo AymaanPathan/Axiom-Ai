@@ -3,10 +3,11 @@ import {
   AlertTriangle,
   ChevronDown,
   ChevronRight,
-  ChevronUp,
-  GripHorizontal,
+  ChevronsLeft,
+  ChevronsRight,
   Terminal,
   Trash2,
+  X,
 } from "lucide-react";
 import type {
   ExecutionLogEntry,
@@ -23,72 +24,43 @@ const TEXT_SECONDARY = "#b3b3b3";
 const TEXT_TERTIARY = "#6e6e6e";
 const TEXT_QUIET = "#454545";
 
-const MIN_HEIGHT = 160;
-const MAX_HEIGHT_VH = 0.75;
-const DEFAULT_HEIGHT = 280;
-const COLLAPSED_HEIGHT = 48;
+// Two fixed widths — narrow default, wide "expanded" mode — rather than a
+// free drag handle. This is the same mental model as the Codex/Copilot
+// sidebar in VS Code: one button snaps the panel between a slim rail and a
+// full working width.
+const WIDTH_NARROW = 400;
+const WIDTH_WIDE = 720;
 const AUTOSCROLL_THRESHOLD_PX = 40;
 
 interface ExecutionConsoleProps {
   entries: ExecutionLogEntry[];
   progress: TrafficProgress | null;
+  expanded: boolean;
+  onToggleExpand: () => void;
   onClear: () => void;
+  onClose: () => void;
 }
 
 export default function ExecutionConsole({
   entries,
   progress,
+  expanded,
+  onToggleExpand,
   onClear,
+  onClose,
 }: ExecutionConsoleProps) {
-  const [height, setHeight] = useState(DEFAULT_HEIGHT);
-  const [collapsed, setCollapsed] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
-  const dragState = useRef<{ startY: number; startHeight: number } | null>(
-    null,
-  );
   const bodyRef = useRef<HTMLDivElement>(null);
 
   const isRunning =
     progress?.status === "starting" || progress?.status === "running";
 
-  // --- drag-to-resize ---
-  useEffect(() => {
-    const handleMove = (e: MouseEvent) => {
-      if (!dragState.current) return;
-      const delta = dragState.current.startY - e.clientY;
-      const maxHeight = window.innerHeight * MAX_HEIGHT_VH;
-      const next = Math.min(
-        maxHeight,
-        Math.max(MIN_HEIGHT, dragState.current.startHeight + delta),
-      );
-      setHeight(next);
-    };
-    const handleUp = () => {
-      dragState.current = null;
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    window.addEventListener("mousemove", handleMove);
-    window.addEventListener("mouseup", handleUp);
-    return () => {
-      window.removeEventListener("mousemove", handleMove);
-      window.removeEventListener("mouseup", handleUp);
-    };
-  }, []);
-
-  const startDrag = (e: React.MouseEvent) => {
-    if (collapsed) return;
-    dragState.current = { startY: e.clientY, startHeight: height };
-    document.body.style.cursor = "ns-resize";
-    document.body.style.userSelect = "none";
-  };
-
   // --- autoscroll, unless the user has scrolled up to read history ---
   useEffect(() => {
-    if (!autoScroll || collapsed) return;
+    if (!autoScroll) return;
     const el = bodyRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [entries, autoScroll, collapsed]);
+  }, [entries, autoScroll]);
 
   const handleBodyScroll = () => {
     const el = bodyRef.current;
@@ -134,34 +106,20 @@ export default function ExecutionConsole({
 
   return (
     <div
-      className="fixed inset-x-0 bottom-0 z-40 flex flex-col border-t"
+      className="fixed inset-y-0 right-0 z-40 flex flex-col border-l"
       style={{
-        height: collapsed ? COLLAPSED_HEIGHT : height,
+        width: expanded ? WIDTH_WIDE : WIDTH_NARROW,
         borderColor: BORDER,
         background: "#0a0a0a",
+        transition: "width 160ms ease",
       }}
     >
-      {/* Resize handle */}
-      {!collapsed && (
-        <div
-          onMouseDown={startDrag}
-          className="group flex h-3 shrink-0 cursor-ns-resize items-center justify-center transition-colors hover:bg-white/5"
-        >
-          <GripHorizontal
-            size={13}
-            style={{ color: TEXT_QUIET }}
-            className="group-hover:text-white"
-          />
-        </div>
-      )}
-
       {/* Header */}
       <div
-        className="mx-auto flex w-full max-w-[980px] shrink-0 items-center justify-between border-b px-6 py-3"
+        className="flex shrink-0 items-center justify-between border-b px-4 py-3.5"
         style={{ borderColor: BORDER, fontFamily: SANS }}
       >
-        <button
-          onClick={() => setCollapsed((c) => !c)}
+        <div
           className="flex items-center gap-2.5 text-[13px] font-semibold"
           style={{ color: TEXT_PRIMARY }}
         >
@@ -184,33 +142,12 @@ export default function ExecutionConsole({
               done
             </span>
           )}
-        </button>
+        </div>
 
         <div
-          className="flex items-center gap-4 text-[12px]"
+          className="flex items-center gap-1"
           style={{ color: TEXT_TERTIARY }}
         >
-          {entries.length > 0 && (
-            <span style={{ fontFamily: MONO }} className="font-medium">
-              <span style={{ color: TEXT_PRIMARY }}>{successCount} ok</span>
-              {errorCount > 0 && (
-                <>
-                  <span style={{ color: BORDER_STRONG }}> · </span>
-                  <span style={{ color: TEXT_PRIMARY, fontWeight: 700 }}>
-                    {errorCount} err
-                  </span>
-                </>
-              )}
-              {scriptErrorCount > 0 && (
-                <>
-                  <span style={{ color: BORDER_STRONG }}> · </span>
-                  <span style={{ color: TEXT_SECONDARY }}>
-                    {scriptErrorCount} script err
-                  </span>
-                </>
-              )}
-            </span>
-          )}
           <button
             onClick={onClear}
             disabled={entries.length === 0}
@@ -220,94 +157,139 @@ export default function ExecutionConsole({
             <Trash2 size={13} />
           </button>
           <button
-            onClick={() => setCollapsed((c) => !c)}
+            onClick={onToggleExpand}
             className="flex items-center gap-1 rounded-lg p-1.5 transition-colors hover:bg-white/5 hover:text-white"
-            title={collapsed ? "Expand" : "Collapse"}
+            title={expanded ? "Collapse panel" : "Expand panel"}
           >
-            {collapsed ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            {expanded ? (
+              <ChevronsRight size={14} />
+            ) : (
+              <ChevronsLeft size={14} />
+            )}
+          </button>
+          <button
+            onClick={onClose}
+            className="flex items-center gap-1 rounded-lg p-1.5 transition-colors hover:bg-white/5 hover:text-white"
+            title="Close console"
+          >
+            <X size={14} />
           </button>
         </div>
       </div>
 
-      {/* Error breakdown strip — distinct failure causes at a glance */}
-      {!collapsed && errorGroups.length > 0 && (
+      {/* Run summary strip */}
+      {entries.length > 0 && (
         <div
-          className="mx-auto flex w-full max-w-[980px] shrink-0 flex-wrap items-center gap-2 border-b px-6 py-2.5"
+          className="flex shrink-0 items-center gap-4 border-b px-4 py-2.5 text-[12px]"
+          style={{ borderColor: BORDER, color: TEXT_TERTIARY }}
+        >
+          <span style={{ fontFamily: MONO }} className="font-medium">
+            <span style={{ color: TEXT_PRIMARY }}>{successCount} ok</span>
+            {errorCount > 0 && (
+              <>
+                <span style={{ color: BORDER_STRONG }}> · </span>
+                <span style={{ color: TEXT_PRIMARY, fontWeight: 700 }}>
+                  {errorCount} err
+                </span>
+              </>
+            )}
+            {scriptErrorCount > 0 && (
+              <>
+                <span style={{ color: BORDER_STRONG }}> · </span>
+                <span style={{ color: TEXT_SECONDARY }}>
+                  {scriptErrorCount} script err
+                </span>
+              </>
+            )}
+          </span>
+        </div>
+      )}
+
+      {/* Error breakdown strip — distinct failure causes at a glance */}
+      {errorGroups.length > 0 && (
+        <div
+          className="flex shrink-0 flex-col gap-2 border-b px-4 py-2.5"
           style={{ borderColor: BORDER, fontFamily: MONO, fontSize: 11.5 }}
         >
-          {errorGroups.slice(0, 6).map((g, i) => (
+          {errorGroups.slice(0, expanded ? 10 : 4).map((g, i) => (
             <span
               key={i}
               className="flex items-center gap-1.5 rounded-md border px-2 py-1"
               style={{ borderColor: BORDER_STRONG }}
               title={g.message}
             >
-              <span className="font-bold" style={{ color: TEXT_PRIMARY }}>
+              <span
+                className="shrink-0 font-bold"
+                style={{ color: TEXT_PRIMARY }}
+              >
                 {g.status || "ERR"}
               </span>
-              <span
-                className="max-w-[280px] truncate"
-                style={{ color: TEXT_SECONDARY }}
-              >
+              <span className="truncate" style={{ color: TEXT_SECONDARY }}>
                 {g.message}
               </span>
               <span
-                className="rounded border px-1.5 py-0.5 text-[10px] font-bold"
+                className="ml-auto shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-bold"
                 style={{ borderColor: BORDER_STRONG, color: TEXT_PRIMARY }}
               >
                 ×{g.count}
               </span>
             </span>
           ))}
-          {errorGroups.length > 6 && (
+          {errorGroups.length > (expanded ? 10 : 4) && (
             <span style={{ color: TEXT_QUIET }}>
-              +{errorGroups.length - 6} more distinct errors
+              +{errorGroups.length - (expanded ? 10 : 4)} more distinct errors
             </span>
           )}
         </div>
       )}
 
       {/* Body */}
-      {!collapsed && (
-        <div
-          ref={bodyRef}
-          onScroll={handleBodyScroll}
-          className="relative mx-auto w-full max-w-[980px] flex-1 overflow-y-auto px-6 py-3.5"
-          style={{ fontFamily: MONO, fontSize: 12.5, lineHeight: 1.85 }}
-        >
-          {entries.length === 0 ? (
-            <p style={{ color: TEXT_QUIET }}>
-              {isRunning
-                ? "Waiting for output…"
-                : "No output yet — run a load test to see execution logs here."}
-            </p>
-          ) : (
-            entries.map((entry) => <LogLine key={entry.id} entry={entry} />)
-          )}
+      <div
+        ref={bodyRef}
+        onScroll={handleBodyScroll}
+        className="relative flex-1 overflow-y-auto px-4 py-3.5"
+        style={{ fontFamily: MONO, fontSize: 12.5, lineHeight: 1.85 }}
+      >
+        {entries.length === 0 ? (
+          <p style={{ color: TEXT_QUIET }}>
+            {isRunning
+              ? "Waiting for output…"
+              : "No output yet — run a load test to see execution logs here."}
+          </p>
+        ) : (
+          entries.map((entry) => (
+            <LogLine key={entry.id} entry={entry} expanded={expanded} />
+          ))
+        )}
 
-          {!autoScroll && entries.length > 0 && (
-            <button
-              onClick={jumpToLatest}
-              className="sticky bottom-1 left-full ml-auto flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] font-medium shadow-lg transition-colors"
-              style={{
-                borderColor: BORDER_STRONG,
-                color: TEXT_PRIMARY,
-                background: "#111111",
-                fontFamily: SANS,
-              }}
-            >
-              <ChevronDown size={12} />
-              Jump to latest
-            </button>
-          )}
-        </div>
-      )}
+        {!autoScroll && entries.length > 0 && (
+          <button
+            onClick={jumpToLatest}
+            className="sticky bottom-1 left-full ml-auto flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] font-medium shadow-lg transition-colors"
+            style={{
+              borderColor: BORDER_STRONG,
+              color: TEXT_PRIMARY,
+              background: "#111111",
+              fontFamily: SANS,
+            }}
+          >
+            <ChevronDown size={12} />
+            Jump to latest
+          </button>
+        )}
+      </div>
     </div>
   );
 }
 
-function LogLine({ entry }: { entry: ExecutionLogEntry }) {
-  const [expanded, setExpanded] = useState(false);
+function LogLine({
+  entry,
+  expanded,
+}: {
+  entry: ExecutionLogEntry;
+  expanded: boolean;
+}) {
+  const [open, setOpen] = useState(false);
 
   const timeLabel = new Date(entry.timestamp).toLocaleTimeString([], {
     hour12: false,
@@ -320,10 +302,10 @@ function LogLine({ entry }: { entry: ExecutionLogEntry }) {
       !entry.ok && Boolean(entry.responseBody || entry.requestBody);
 
     return (
-      <div className="py-0.5">
+      <div className="py-1">
         <div
-          className={`flex items-start gap-3 ${hasDetail ? "cursor-pointer" : ""}`}
-          onClick={() => hasDetail && setExpanded((e) => !e)}
+          className={`flex flex-wrap items-start gap-x-2.5 gap-y-0.5 ${hasDetail ? "cursor-pointer" : ""}`}
+          onClick={() => hasDetail && setOpen((o) => !o)}
         >
           <span className="shrink-0" style={{ color: TEXT_QUIET }}>
             {timeLabel}
@@ -339,31 +321,30 @@ function LogLine({ entry }: { entry: ExecutionLogEntry }) {
           </span>
           {entry.method && entry.url && (
             <span
-              className="shrink-0 truncate"
+              className={expanded ? "shrink-0" : "min-w-0 truncate"}
               style={{ color: TEXT_TERTIARY }}
             >
               {entry.method} {entry.url}
             </span>
           )}
-          {!entry.ok && entry.responseBodySummary && (
-            <span className="truncate" style={{ color: TEXT_SECONDARY }}>
-              — {entry.responseBodySummary}
-            </span>
-          )}
           {hasDetail && (
             <span className="ml-auto shrink-0" style={{ color: TEXT_TERTIARY }}>
-              {expanded ? (
-                <ChevronDown size={12} />
-              ) : (
-                <ChevronRight size={12} />
-              )}
+              {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            </span>
+          )}
+          {!entry.ok && entry.responseBodySummary && (
+            <span
+              className="w-full truncate pl-[3.6rem]"
+              style={{ color: TEXT_SECONDARY }}
+            >
+              {entry.responseBodySummary}
             </span>
           )}
         </div>
 
-        {expanded && hasDetail && (
+        {open && hasDetail && (
           <div
-            className="ml-[3.1rem] mt-1.5 mb-1 space-y-2 rounded-lg border p-3"
+            className="mt-1.5 mb-1 space-y-2 rounded-lg border p-3"
             style={{ borderColor: BORDER, background: "#0d0d0d" }}
           >
             {entry.requestBody && (
@@ -406,10 +387,10 @@ function LogLine({ entry }: { entry: ExecutionLogEntry }) {
 
   if (entry.kind === "script_error") {
     return (
-      <div className="py-0.5">
+      <div className="py-1">
         <div
-          className="flex items-start gap-3 cursor-pointer"
-          onClick={() => setExpanded((e) => !e)}
+          className="flex items-start gap-2.5 cursor-pointer"
+          onClick={() => setOpen((o) => !o)}
         >
           <span className="shrink-0" style={{ color: TEXT_QUIET }}>
             {timeLabel}
@@ -425,22 +406,18 @@ function LogLine({ entry }: { entry: ExecutionLogEntry }) {
           >
             script error
           </span>
-          <span className="truncate" style={{ color: TEXT_TERTIARY }}>
-            — {entry.message}
+          <span className="min-w-0 truncate" style={{ color: TEXT_TERTIARY }}>
+            {entry.message}
           </span>
           {entry.stack && (
             <span className="ml-auto shrink-0" style={{ color: TEXT_TERTIARY }}>
-              {expanded ? (
-                <ChevronDown size={12} />
-              ) : (
-                <ChevronRight size={12} />
-              )}
+              {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
             </span>
           )}
         </div>
-        {expanded && entry.stack && (
+        {open && entry.stack && (
           <div
-            className="ml-[3.1rem] mt-1.5 mb-1 rounded-lg border p-3"
+            className="mt-1.5 mb-1 rounded-lg border p-3"
             style={{ borderColor: BORDER, background: "#0d0d0d" }}
           >
             <div
@@ -464,7 +441,7 @@ function LogLine({ entry }: { entry: ExecutionLogEntry }) {
 
   const isErr = entry.stream === "stderr";
   return (
-    <div className="flex items-start gap-3 py-0.5">
+    <div className="flex items-start gap-2.5 py-1">
       <span className="shrink-0" style={{ color: TEXT_QUIET }}>
         {timeLabel}
       </span>
@@ -475,7 +452,7 @@ function LogLine({ entry }: { entry: ExecutionLogEntry }) {
         {isErr ? "stderr" : "stdout"}
       </span>
       <span
-        className="whitespace-pre-wrap break-all"
+        className="min-w-0 whitespace-pre-wrap break-all"
         style={{ color: isErr ? TEXT_PRIMARY : TEXT_SECONDARY }}
       >
         {entry.message}
