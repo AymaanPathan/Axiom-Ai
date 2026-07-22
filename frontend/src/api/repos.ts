@@ -88,6 +88,30 @@ export interface LoadScriptResult {
   thresholdsPassed: boolean | null;
   scriptErrorCount: number;
 }
+
+export interface PerformanceReport {
+  rootCause: string;
+  severity: "critical" | "warning" | "info";
+  evidence: string[];
+  suggestedFix: {
+    title: string;
+    description: string;
+    estimatedImprovementPercent: { min: number; max: number };
+  };
+  diff: { filePath: string; unifiedDiff: string } | null;
+  confidence: "high" | "medium" | "low";
+  computed: {
+    requestsSent: number;
+    dbSpansPerRequest: number | null;
+    dbTimeSharePercent: number | null;
+    externalSpansPerRequest: number | null;
+    externalTimeSharePercent: number | null;
+    p95Ms: number | null;
+    avgMs: number;
+    errorRatePercent: number;
+  };
+}
+
 /** GET /repos — list the signed-in user's GitHub repositories */
 export async function listRepos(): Promise<GithubRepo[]> {
   const { data } = await apiClient.get<{ repos: GithubRepo[] }>("/repos");
@@ -225,6 +249,19 @@ export async function runLoadScript(
   const { data } = await apiClient.post<LoadScriptResult>(
     `/repos/${repositoryId}/run-load-script`,
     { script, authToken },
+  );
+  return data;
+}
+
+export async function analyzePerformance(
+  repositoryId: string,
+  routeIndex: number,
+  runResult: LoadScriptResult,
+  telemetry: RouteTelemetry | null,
+): Promise<PerformanceReport> {
+  const { data } = await apiClient.post<PerformanceReport>(
+    `/repos/${repositoryId}/analyze-performance`,
+    { routeIndex, runResult, telemetry },
   );
   return data;
 }

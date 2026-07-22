@@ -16,6 +16,7 @@ import { resolveConnectedFiles } from "../parsing/connectedFiles.service.js";
 import { explainEndpoint } from "../services/explain.service.js";
 import { generateTrafficForRoute } from "../services/trafficGenerator.service.js";
 import { getRouteTelemetry } from "../services/signoz.service.js";
+import { analyzeLoadTestPerformance } from "../services/performanceAnalysis.service.js";
 import {
   getServiceHealth,
   getSystemStatus,
@@ -699,6 +700,66 @@ router.post(
     }
   },
 );
+
+router.post(
+  "/:id/analyze-performance",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    const { routeIndex, runResult, telemetry } = req.body as {
+      routeIndex?: number;
+      runResult?: import("../services/loadScriptRunner.service.js").LoadScriptResult;
+      telemetry?: import("../services/signoz.service.js").RouteTelemetry | null;
+    };
+
+    if (routeIndex === undefined || !runResult) {
+      return res
+        .status(400)
+        .json({ error: "routeIndex and runResult are required" });
+    }
+
+    const repository = await RepositoryModel.findOne({
+      _id: req.params.id,
+      userId: req.user!.githubId,
+    });
+    if (!repository)
+      return res.status(404).json({ error: "Repository not found" });
+
+    const route = repository.discoveredRoutes[routeIndex];
+    if (!route) return res.status(400).json({ error: "Unknown routeIndex" });
+
+    const repoRoot = path.resolve(repository.localPath);
+    let codeContext = "";
+    try {
+      const { files } = await resolveConnectedFiles(
+        repoRoot,
+        route.file,
+        route.line,
+      );
+      codeContext = files
+        .map((f) => `// ${f.path} (${f.role})\n${f.content}`)
+        .join("\n\n");
+    } catch (err) {
+      console.error("Failed to resolve connected files for analysis:", err);
+    }
+
+    try {
+      const report = await analyzeLoadTestPerformance({
+        metadata: { method: route.method, routePath: route.routePath },
+        runResult,
+        telemetry: telemetry ?? null,
+        codeContext,
+      });
+      res.json(report);
+    } catch (err) {
+      console.error("Failed to analyze performance:", err);
+      const message =
+        err instanceof Error ? err.message : "Failed to analyze performance";
+      res.status(502).json({ error: message });
+    }
+  },
+);
+
+
 // POST /repos/:id/run-load-script — execute the (possibly user-edited)
 // script with k6, streaming per-request results over the same socket
 // room/events the traffic-generator UI already listens to.
