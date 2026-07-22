@@ -21,6 +21,12 @@ import {
   getSystemStatus,
   getMetricHistory,
 } from "../services/metrics-observer.service.js";
+
+import { generateLoadScript, buildEndpointMetadata } from "../services/loadScriptGenerator.service.js";
+import { runLoadScript } from "../services/loadScriptRunner.service.js";
+import { detectRouteMiddlewares } from "../parsing/middleware-detect.js";
+
+
 import {
   getEndpointMetrics,
   getRecentTraces,
@@ -623,5 +629,96 @@ router.get(
     res.json({ points });
   },
 );
+
+router.post(
+  "/:id/generate-load-script",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    const { routeIndex, description } = req.body as {
+      routeIndex?: number;
+      description?: string;
+    };
+    if (routeIndex === undefined || !description?.trim()) {
+      return res
+        .status(400)
+        .json({ error: "routeIndex and description are required" });
+    }
+
+    const repository = await RepositoryModel.findOne({
+      _id: req.params.id,
+      userId: req.user!.githubId,
+    });
+    if (!repository)
+      return res.status(404).json({ error: "Repository not found" });
+
+    const route = repository.discoveredRoutes[routeIndex];
+    if (!route) return res.status(400).json({ error: "Unknown routeIndex" });
+
+    const repoRoot = path.resolve(repository.localPath);
+    const middlewares = await detectRouteMiddlewares(
+      repoRoot,
+      route.file,
+      route.line,
+    );
+
+    const metadata = buildEndpointMetadata({
+      routePath: route.routePath,
+      method: route.method,
+      appPort: repository.appPort,
+      middlewares,
+    });
+
+    // Same route -> controller -> service resolution used by /explain — this
+    // is the real ground truth for the request shape, not a name-based guess.
+    let codeContext = "";
+    try {
+      const { files } = await resolveConnectedFiles(
+        repoRoot,
+        route.file,
+        route.line,
+      );
+      codeContext = files
+        .map((f) => `// ${f.path} (${f.role})\n${f.content}`)
+        .join("\n\n");
+    } catch (err) {
+      console.error("Failed to resolve connected files for load script:", err);
+    }
+
+    try {
+      const result = await generateLoadScript({
+        metadata,
+        codeContext,
+        description,
+      });
+      res.json(result);
+    } catch (err) {
+      console.error("Failed to generate load script:", err);
+      const message =
+        err instanceof Error ? err.message : "Failed to generate load script";
+      res.status(502).json({ error: message });
+    }
+  },
+);
+// POST /repos/:id/run-load-script — execute the (possibly user-edited)
+// script with k6, streaming per-request results over the same socket
+// room/events the traffic-generator UI already listens to.
+router.post("/:id/run-load-script", requireAuth, async (req: AuthedRequest, res) => {
+  const { script } = req.body as { script?: string };
+  if (!script?.trim()) {
+    return res.status(400).json({ error: "script is required" });
+  }
+
+  const repository = await RepositoryModel.findOne({ _id: req.params.id, userId: req.user!.githubId });
+  if (!repository) return res.status(404).json({ error: "Repository not found" });
+
+  try {
+    const result = await runLoadScript({ repositoryId: repository._id.toString(), script });
+    res.json(result);
+  } catch (err) {
+    console.error("Failed to run load script:", err);
+    const message = err instanceof Error ? err.message : "Failed to run load script";
+    res.status(502).json({ error: message });
+  }
+});
 
 export default router;

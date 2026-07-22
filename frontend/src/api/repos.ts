@@ -74,6 +74,20 @@ export interface RouteTelemetry {
   warnings: string[];
 }
 
+export interface LoadScriptResult {
+  requestsSent: number;
+  successCount: number;
+  errorCount: number;
+  windowStart: number;
+  windowEnd: number;
+  avgDurationMs: number;
+  p95DurationMs: number | null;
+  p99DurationMs: number | null;
+  requestsPerSecond: number | null;
+  errorRate: number;
+  thresholdsPassed: boolean | null;
+  scriptErrorCount: number;
+}
 /** GET /repos — list the signed-in user's GitHub repositories */
 export async function listRepos(): Promise<GithubRepo[]> {
   const { data } = await apiClient.get<{ repos: GithubRepo[] }>("/repos");
@@ -184,6 +198,33 @@ export async function getConnectedFiles(
   const { data } = await apiClient.get<ConnectedFilesResult>(
     `/repos/${repositoryId}/connected-files`,
     { params: { file, line } },
+  );
+  return data;
+}
+
+export async function generateLoadScript(
+  repositoryId: string,
+  routeIndex: number,
+  description: string,
+): Promise<{ script: string; authRequired: boolean }> {
+  const { data } = await apiClient.post<{
+    script: string;
+    authRequired: boolean;
+  }>(`/repos/${repositoryId}/generate-load-script`, {
+    routeIndex,
+    description,
+  });
+  return data;
+}
+
+export async function runLoadScript(
+  repositoryId: string,
+  script: string,
+  authToken?: string,
+): Promise<LoadScriptResult> {
+  const { data } = await apiClient.post<LoadScriptResult>(
+    `/repos/${repositoryId}/run-load-script`,
+    { script, authToken },
   );
   return data;
 }
