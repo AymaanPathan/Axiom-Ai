@@ -92,7 +92,7 @@ benchmark-results/
 # ===========================
 generated/
 patches/
-
+backend/workspaces/
 # ===========================
 # Runtime
 # ===========================
