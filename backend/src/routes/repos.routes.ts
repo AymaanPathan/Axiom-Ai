@@ -15,7 +15,7 @@ import { detectAppPort } from "../parsing/detect-port.js";
 import { resolveConnectedFiles } from "../parsing/connectedFiles.service.js";
 import { explainEndpoint } from "../services/explain.service.js";
 import { generateTrafficForRoute } from "../services/trafficGenerator.service.js";
-import { getRouteTelemetry } from "../services/signoz.service.js";
+import { getDbOperationBreakdown, getRouteTelemetry } from "../services/signoz.service.js";
 import { analyzeLoadTestPerformance } from "../services/performanceAnalysis.service.js";
 import {
   applySnippetReplace,
@@ -751,12 +751,26 @@ router.post(
     }
 
     try {
-      const report = await analyzeLoadTestPerformance({
-        metadata: { method: route.method, routePath: route.routePath },
-        runResult,
-        telemetry: telemetry ?? null,
-        codeContext,
-      });
+      let dbBreakdown: import("../services/signoz.service.js").DbOperationBreakdown[] =
+        [];
+      if (telemetry) {
+        const serviceName = repository.githubFullName.split("/")[1];
+        const { breakdown } = await getDbOperationBreakdown(
+          serviceName,
+          runResult.windowStart,
+          runResult.windowEnd,
+        );
+        dbBreakdown = breakdown;
+      }
+      
+       const report = await analyzeLoadTestPerformance({
+         metadata: { method: route.method, routePath: route.routePath },
+         runResult,
+         telemetry: telemetry ?? null,
+         codeContext,
+         dbBreakdown,
+       });
+
       res.json(report);
     } catch (err) {
       console.error("Failed to analyze performance:", err);

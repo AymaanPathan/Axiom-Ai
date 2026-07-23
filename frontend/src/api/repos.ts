@@ -44,6 +44,7 @@ export interface ConnectedFilesResult {
 }
 
 export interface RunState {
+  errorMessage: string | undefined;
   runId: string;
   status: "starting" | "installing" | "running" | "exited" | "error";
   exitCode?: number;
@@ -109,12 +110,16 @@ export interface PerformanceReport {
     requestsSent: number;
     dbSpansPerRequest: number | null;
     dbTimeSharePercent: number | null;
+    dbCallsOverlap: boolean;
+    dbCumulativeTimeMs: number | null;
     externalSpansPerRequest: number | null;
     externalTimeSharePercent: number | null;
+    externalCallsOverlap: boolean;
     p95Ms: number | null;
     avgMs: number;
     errorRatePercent: number;
   };
+  dbBreakdown: DbOperationBreakdown[];
 }
 
 export interface ApplyFixResult {
@@ -123,6 +128,13 @@ export interface ApplyFixResult {
   runResult?: LoadScriptResult;
   telemetry?: RouteTelemetry | null;
   error?: string;
+}
+
+export interface DbOperationBreakdown {
+  operation: string;
+  callCount: number;
+  avgDurationMs: number;
+  totalDurationMs: number;
 }
 
 /** GET /repos — list the signed-in user's GitHub repositories */
@@ -156,6 +168,17 @@ export async function getRepoDetail(
   ]);
   return { repositoryId, requiredEnvVars: env.requiredEnvVars, ...data };
 }
+
+export async function getRun(
+  repositoryId: string,
+  runId: string,
+): Promise<RunState> {
+  const { data } = await apiClient.get<RunState>(
+    `/repos/${repositoryId}/runs/${runId}`,
+  );
+  return data;
+}
+
 
 export async function getEnvStatus(repositoryId: string): Promise<EnvStatus> {
   const res = await apiClient.get<EnvStatus>(`/repos/${repositoryId}/env`);
@@ -294,3 +317,4 @@ export async function applyFixAndRetest(
   );
   return data;
 }
+

@@ -5,13 +5,21 @@ import { fetchRepoDetail } from "../store/slices/reposSlice";
 import ObservabilityLauncher from "../components/ObservabilityLauncher";
 import MissingEnvPanel from "../components/MissingEnvPanel";
 
-const METHOD_COLOR: Record<string, string> = {
-  GET: "text-[#5aa6ff]",
-  POST: "text-[#3ecf5f]",
-  PUT: "text-[#f0e63f]",
-  PATCH: "text-[#f0e63f]",
-  DELETE: "text-[#f27272]",
-};
+// ---------------------------------------------------------------------------
+// Design tokens — same palette as ApiWorkspace / ObservabilityLauncher,
+// monochrome only.
+// ---------------------------------------------------------------------------
+const SANS = "'Inter', ui-sans-serif, system-ui, sans-serif";
+const MONO = "'Berkeley Mono', ui-monospace, monospace";
+
+const BG = "#0a0a0a";
+const SURFACE = "#111111";
+const BORDER = "#1e1e1e";
+const BORDER_STRONG = "#2e2e2e";
+const TEXT_PRIMARY = "#f5f5f5";
+const TEXT_SECONDARY = "#b3b3b3";
+const TEXT_TERTIARY = "#6e6e6e";
+const TEXT_QUIET = "#4a4a4a";
 
 export default function RepoDetail() {
   const { repositoryId } = useParams<{ repositoryId: string }>();
@@ -34,18 +42,29 @@ export default function RepoDetail() {
 
   if (!repo) {
     return (
-      <div className="px-10 py-10">
-        <p className="text-[13px] text-[#9096a1]">Loading repository…</p>
+      <div
+        className="min-h-screen px-10 py-10"
+        style={{ background: BG, fontFamily: SANS }}
+      >
+        <p className="text-[13px]" style={{ color: TEXT_TERTIARY }}>
+          Loading repository…
+        </p>
       </div>
     );
   }
 
   return (
-    <div className="w-full px-10 py-10">
+    <div
+      className="w-full min-h-screen px-10 py-10"
+      style={{ background: BG, fontFamily: SANS }}
+    >
       <button
         type="button"
         onClick={() => navigate("/workspace")}
-        className="mb-8 flex items-center gap-1.5 text-[13px] font-medium text-[#9096a1] transition-colors hover:text-white"
+        className="mb-8 flex items-center gap-1.5 text-[13px] font-medium transition-colors"
+        style={{ color: TEXT_TERTIARY }}
+        onMouseEnter={(e) => (e.currentTarget.style.color = TEXT_PRIMARY)}
+        onMouseLeave={(e) => (e.currentTarget.style.color = TEXT_TERTIARY)}
       >
         ← Repositories
       </button>
@@ -53,29 +72,35 @@ export default function RepoDetail() {
       {/* Header */}
       <div className="mb-8 flex items-start justify-between">
         <div className="flex items-center gap-4">
-          <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-[#2a2d33] bg-[#141518] text-[22px]">
+          <div
+            className="flex h-12 w-12 items-center justify-center rounded-xl border text-[22px]"
+            style={{ borderColor: BORDER, background: SURFACE }}
+          >
             📦
           </div>
           <div>
-            <h1 className="text-[30px] font-[560] leading-[1.1] tracking-[-0.015em] text-white">
+            <h1
+              className="text-[30px] font-[560] leading-[1.1] tracking-[-0.015em]"
+              style={{ color: TEXT_PRIMARY }}
+            >
               {repo.githubFullName.split("/")[1]}
             </h1>
-            <p className="mt-1 text-[13px] text-[#9096a1]">
+            <p className="mt-1 text-[13px]" style={{ color: TEXT_TERTIARY }}>
               {repo.githubFullName}
             </p>
           </div>
         </div>
         <span
-          className={`flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-[12px] font-[560] ${
-            launched
-              ? "border-[#3ecf5f]/30 bg-[#3ecf5f]/10 text-[#3ecf5f]"
-              : "border-[#2a2d33] bg-[#141518] text-[#c4c8d1]"
-          }`}
+          className="flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-[12px] font-[560]"
+          style={{
+            borderColor: launched ? BORDER_STRONG : BORDER,
+            background: SURFACE,
+            color: launched ? TEXT_PRIMARY : TEXT_TERTIARY,
+          }}
         >
           <span
-            className={`h-1.5 w-1.5 rounded-full ${
-              launched ? "bg-[#3ecf5f]" : "bg-[#c4c8d1]"
-            }`}
+            className="h-1.5 w-1.5 rounded-full"
+            style={{ background: launched ? TEXT_PRIMARY : TEXT_QUIET }}
           />
           {launched ? "Live" : "Ready"}
         </span>
@@ -97,12 +122,19 @@ export default function RepoDetail() {
         ].map((stat) => (
           <div
             key={stat.label}
-            className="rounded-xl border border-[#2a2d33] bg-[#141518] px-5 py-4"
+            className="rounded-xl border px-5 py-4"
+            style={{ borderColor: BORDER, background: SURFACE }}
           >
-            <p className="text-[11px] font-medium uppercase tracking-wide text-[#7a808c]">
+            <p
+              className="text-[11px] font-medium uppercase tracking-wide"
+              style={{ color: TEXT_TERTIARY }}
+            >
               {stat.label}
             </p>
-            <p className="mt-1.5 text-[16px] font-[560] text-white">
+            <p
+              className="mt-1.5 text-[16px] font-[560]"
+              style={{ color: TEXT_PRIMARY }}
+            >
               {stat.value}
             </p>
           </div>
@@ -110,7 +142,10 @@ export default function RepoDetail() {
       </div>
 
       {/* Setup checklist */}
-      <div className="mb-6 rounded-xl border border-[#2a2d33] bg-[#141518] p-6">
+      <div
+        className="mb-6 rounded-xl border p-6"
+        style={{ borderColor: BORDER, background: SURFACE }}
+      >
         <div className="flex flex-wrap gap-x-8 gap-y-3">
           {[
             "Repository cloned",
@@ -119,9 +154,13 @@ export default function RepoDetail() {
           ].map((item) => (
             <div
               key={item}
-              className="flex items-center gap-2 text-[13px] font-medium text-[#dde1e8]"
+              className="flex items-center gap-2 text-[13px] font-medium"
+              style={{ color: TEXT_SECONDARY }}
             >
-              <span className="flex h-4 w-4 items-center justify-center rounded-full bg-[#3ecf5f]/15 text-[10px] text-[#3ecf5f]">
+              <span
+                className="flex h-4 w-4 items-center justify-center rounded-full text-[10px]"
+                style={{ background: BORDER_STRONG, color: TEXT_PRIMARY }}
+              >
                 ✓
               </span>
               {item}
@@ -131,18 +170,24 @@ export default function RepoDetail() {
       </div>
 
       {launched && (
-        <div className="mb-6 flex items-center justify-between rounded-xl border border-[#2a2d33] bg-[#141518] p-6">
+        <div
+          className="mb-6 flex items-center justify-between rounded-xl border p-6"
+          style={{ borderColor: BORDER, background: SURFACE }}
+        >
           <div>
-            <h3 className="text-[15px] font-[560] text-white">
+            <h3
+              className="text-[15px] font-[560]"
+              style={{ color: TEXT_PRIMARY }}
+            >
               Service Observability
             </h3>
-            <p className="mt-1 text-[13px] text-[#9096a1]">
+            <p className="mt-1 text-[13px]" style={{ color: TEXT_TERTIARY }}>
               Monitor logs, traces, metrics, CPU, memory and endpoint activity.
             </p>
           </div>
           <Link
             to={`/workspace/repos/${repositoryId}/observability`}
-            className="shrink-0 rounded-lg bg-[#5aa6ff] px-5 py-2.5 text-[13px] font-[560] text-[#08090a] transition-opacity hover:opacity-90"
+            className="shrink-0 rounded-lg bg-white px-5 py-2.5 text-[13px] font-[560] text-black transition-opacity hover:bg-[#e5e5e5]"
           >
             Open Dashboard →
           </Link>
@@ -150,10 +195,18 @@ export default function RepoDetail() {
       )}
 
       {/* Routes */}
-      <div className="mb-6 rounded-xl border border-[#2a2d33] bg-[#141518]">
-        <div className="border-b border-[#2a2d33] px-6 py-4">
-          <span className="text-[13px] font-[560] text-white">Routes</span>
-          <span className="ml-2 text-[13px] text-[#7a808c]">
+      <div
+        className="mb-6 rounded-xl border"
+        style={{ borderColor: BORDER, background: SURFACE }}
+      >
+        <div className="border-b px-6 py-4" style={{ borderColor: BORDER }}>
+          <span
+            className="text-[13px] font-[560]"
+            style={{ color: TEXT_PRIMARY }}
+          >
+            Routes
+          </span>
+          <span className="ml-2 text-[13px]" style={{ color: TEXT_TERTIARY }}>
             {repo.routes.length}
           </span>
         </div>
@@ -161,22 +214,31 @@ export default function RepoDetail() {
           {repo.routes.map((route) => (
             <p
               key={`${route.method}-${route.routePath}-${route.line}`}
-              className="flex items-center gap-4 border-b border-r border-[#1c1e22] px-6 py-4 transition-colors last:border-b-0 hover:bg-white/[0.03] [&:nth-child(2n)]:border-r-0"
+              className="flex items-center gap-4 border-b border-r px-6 py-4 transition-colors last:border-b-0 [&:nth-child(2n)]:border-r-0"
               style={{
-                fontFamily: "'Berkeley Mono', ui-monospace, monospace",
+                fontFamily: MONO,
+                borderColor: BORDER,
               }}
+              onMouseEnter={(e) =>
+                (e.currentTarget.style.background = "rgba(255,255,255,0.03)")
+              }
+              onMouseLeave={(e) =>
+                (e.currentTarget.style.background = "transparent")
+              }
             >
               <span
-                className={`w-14 shrink-0 text-[12px] font-[560] ${
-                  METHOD_COLOR[route.method] ?? "text-[#c4c8d1]"
-                }`}
+                className="w-14 shrink-0 text-[12px] font-[560]"
+                style={{ color: TEXT_PRIMARY }}
               >
                 {route.method}
               </span>
-              <span className="text-[13px] text-[#dde1e8]">
+              <span className="text-[13px]" style={{ color: TEXT_SECONDARY }}>
                 {route.routePath}
               </span>
-              <span className="ml-auto shrink-0 text-[11px] text-[#6b7078]">
+              <span
+                className="ml-auto shrink-0 text-[11px]"
+                style={{ color: TEXT_QUIET }}
+              >
                 {route.file}:{route.line}
               </span>
             </p>

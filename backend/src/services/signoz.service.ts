@@ -290,6 +290,222 @@ export async function runScalarTraceQuerySafe(
   }
 }
 
+export interface DbOperationBreakdown {
+  operation: string;
+  callCount: number;
+  avgDurationMs: number;
+  totalDurationMs: number;
+}
+
+// Grouped scalar query — same builder_query shape as runScalarTraceQuery,
+// but with a groupBy clause so SigNoz returns one row PER distinct value
+// of the group field (e.g. one row per db.operation / query name) instead
+// of a single aggregate row. This is what makes "Product.find() called 74
+// times, avg 2.1ms" possible instead of a single blended DB average.
+export async function runGroupedScalarTraceQuery(
+  start: number,
+  end: number,
+  filterExpression: string,
+  aggregations: Aggregation[],
+  groupByField: string,
+  limit: number,
+): Promise<unknown> {
+  const { baseUrl, apiKey } = getConfig();
+
+  const body = {
+    start,
+    end,
+    requestType: "scalar",
+    compositeQuery: {
+      queries: [
+        {
+          type: "builder_query",
+          spec: {
+            name: "A",
+            signal: "traces",
+            aggregations,
+            groupBy: [{ name: groupByField }],
+            filter: { expression: filterExpression },
+            limit,
+            order: [
+              {
+                key: { name: aggregations[0]?.alias ?? "count" },
+                direction: "desc",
+              },
+            ],
+            disabled: false,
+          },
+        },
+      ],
+    },
+  };
+
+  debugLog("--> [grouped] filter:", filterExpression, "groupBy:", groupByField);
+  console.log(
+    "[SigNoz] grouped scalar query -->",
+    filterExpression,
+    "groupBy:",
+    groupByField,
+  );
+
+  const res = await fetch(`${baseUrl}/api/v5/query_range`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "SIGNOZ-API-KEY": apiKey },
+    body: JSON.stringify(body),
+  });
+
+  const rawText = await res.text();
+  if (!res.ok) {
+    console.error(
+      `[SigNoz] API ERROR ${res.status} on grouped query:`,
+      rawText.slice(0, 500),
+    );
+    throw new Error(
+      `SigNoz API error (${res.status}): ${rawText.slice(0, 300)}`,
+    );
+  }
+
+  debugLog("<-- [grouped] 200 OK, raw body:", rawText.slice(0, 1500));
+  return JSON.parse(rawText);
+}
+
+export async function runGroupedScalarTraceQuerySafe(
+  start: number,
+  end: number,
+  filterExpression: string,
+  aggregations: Aggregation[],
+  groupByField: string,
+  limit: number,
+  label: string,
+  warnings: string[],
+): Promise<unknown> {
+  try {
+    return await enqueueSignozCall(() =>
+      runGroupedScalarTraceQuery(
+        start,
+        end,
+        filterExpression,
+        aggregations,
+        groupByField,
+        limit,
+      ),
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[SigNoz] [${label}] FAILED:`, message);
+    warnings.push(`${label}: ${message}`);
+    return null;
+  }
+}
+
+// Extracts grouped rows. Each row's leading column(s) (columnType !==
+// "aggregation") carry the group-by value itself; the remaining columns
+// are aggregation results in the same order as the `aggregations` array,
+// same positional convention as extractScalarValues.
+function extractGroupedRows(
+  raw: unknown,
+  aggregations: Aggregation[],
+): { groupValue: string; values: Record<string, number | null> }[] {
+  const rows: { groupValue: string; values: Record<string, number | null> }[] =
+    [];
+  const results = (raw as Record<string, any>)?.data?.data?.results;
+  if (!Array.isArray(results) || results.length === 0) return rows;
+
+  const columns: { name: string; columnType?: string }[] =
+    results[0]?.columns ?? [];
+  const dataRows: unknown[][] = results[0]?.data ?? [];
+
+  const groupColIndexes = columns
+    .map((c, i) => ({ c, i }))
+    .filter(({ c }) => c.columnType !== "aggregation")
+    .map(({ i }) => i);
+  const aggColIndexes = columns
+    .map((c, i) => ({ c, i }))
+    .filter(({ c }) => c.columnType === "aggregation")
+    .map(({ i }) => i);
+
+  for (const row of dataRows) {
+    if (!Array.isArray(row)) continue;
+    const groupValue =
+      groupColIndexes.map((i) => String(row[i] ?? "unknown")).join(" ") ||
+      "unknown";
+    const values: Record<string, number | null> = {};
+    aggregations.forEach((agg, idx) => {
+      const colIndex = aggColIndexes[idx];
+      const val = colIndex !== undefined ? row[colIndex] : undefined;
+      values[agg.alias] =
+        typeof val === "number" && !Number.isNaN(val)
+          ? val
+          : val
+            ? Number(val)
+            : null;
+    });
+    rows.push({ groupValue, values });
+  }
+
+  return rows;
+}
+
+// Breaks DB span time down by operation (db.operation / db.statement's
+// operation prefix / span name — whichever attribute your instrumentation
+// populates). Falls back gracefully if the group field doesn't exist on
+// this service's spans — returns an empty array rather than throwing, so
+// callers can treat "no breakdown available" as a normal case.
+export async function getDbOperationBreakdown(
+  serviceName: string,
+  start: number,
+  end: number,
+  limit = 10,
+): Promise<{ breakdown: DbOperationBreakdown[]; warnings: string[] }> {
+  const escapedService = serviceName.replace(/'/g, "\\'");
+  const warnings: string[] = [];
+
+  const aggregations: Aggregation[] = [
+    { expression: "count()", alias: "call_count" },
+    { expression: `avg(${DURATION_ATTRIBUTE})`, alias: "avg_duration" },
+    { expression: `sum(${DURATION_ATTRIBUTE})`, alias: "total_duration" },
+  ];
+
+  // "db.operation" is the standard OTEL semantic-convention attribute for
+  // the query verb (find, insert, aggregate, ...). If your instrumentation
+  // populates a different field for query identity (e.g. "db.statement" or
+  // the span "name" itself), swap this string — everything else here is
+  // attribute-name agnostic.
+  const GROUP_FIELD = "db.operation";
+
+  const raw = await runGroupedScalarTraceQuerySafe(
+    start,
+    end,
+    `${SERVICE_ATTRIBUTE} = '${escapedService}' AND dbSystem EXISTS`,
+    aggregations,
+    GROUP_FIELD,
+    limit,
+    "DB operation breakdown",
+    warnings,
+  );
+
+  if (raw === null) return { breakdown: [], warnings };
+
+  const rows = extractGroupedRows(raw, aggregations);
+  if (rows.length === 0) {
+    warnings.push(
+      `DB operation breakdown: query succeeded but returned no grouped rows — "${GROUP_FIELD}" may not be populated by this service's instrumentation`,
+    );
+  }
+
+  const breakdown: DbOperationBreakdown[] = rows
+    .map((r) => ({
+      operation: r.groupValue,
+      callCount: r.values.call_count ?? 0,
+      avgDurationMs: nanoToMs(r.values.avg_duration),
+      totalDurationMs: nanoToMs(r.values.total_duration),
+    }))
+    .filter((b) => b.callCount > 0)
+    .sort((a, b) => b.totalDurationMs - a.totalDurationMs);
+
+  return { breakdown, warnings };
+}
+
 export async function runRawTraceQuerySafe(
   start: number,
   end: number,

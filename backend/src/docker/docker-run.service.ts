@@ -12,7 +12,12 @@ import {
 
 const CONTAINER_MEMORY = "512m";
 const CONTAINER_CPUS = "1";
-const READINESS_TIMEOUT_MS = 30_000;
+// Was 30s — way too short. That clock starts the moment the container is
+// spawned, before `npm install` even runs, so a normal repo would blow
+// through this while still installing deps and get marked "error" even
+// though the container went on to start successfully seconds later. Bumped
+// to a budget that actually covers install + build + boot.
+const READINESS_TIMEOUT_MS = 180_000;
 const HEALTH_POLL_INTERVAL_MS = 500;
 const READY_LOG_PATTERN = /(listening|running|started|ready)\b/i;
 
@@ -78,15 +83,18 @@ export async function startDockerRun({
     healthCheckPath,
   }).catch(async (err) => {
     console.error(`Run ${runId} failed:`, err);
+    const message = err instanceof Error ? err.message : "Unknown error";
     await RunModel.findByIdAndUpdate(runId, {
       status: "error",
-      errorMessage: err instanceof Error ? err.message : "Unknown error",
+      errorMessage: message,
       finishedAt: new Date(),
     });
-    getIO().to(`run:${runId}`).emit("run:status", { runId, status: "error" });
+    getIO()
+      .to(`run:${runId}`)
+      .emit("run:status", { runId, status: "error", message });
     getIO()
       .to(`repo:${repositoryId}`)
-      .emit("run:status", { runId, status: "error" });
+      .emit("run:status", { runId, status: "error", message });
   });
 
   return runId;
@@ -110,11 +118,16 @@ export async function stopDockerRun(runId: string): Promise<boolean> {
   return true;
 }
 
+// `isAborted` lets the caller bail out the instant the container process
+// actually exits, instead of always sitting through the full timeout even
+// when we already know (from the exit event) that it's never coming up.
 async function pollHealthCheck(
   url: string,
   deadline: number,
+  isAborted: () => boolean,
 ): Promise<boolean> {
   while (Date.now() < deadline) {
+    if (isAborted()) return false;
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(1000) });
       if (res) return true;
@@ -221,10 +234,21 @@ async function executeRun({
     manualStop: false,
   });
 
+  // Set the instant the container process exits, checked by pollHealthCheck
+  // so it can stop waiting immediately instead of riding out the full
+  // timeout on a container that's already gone.
+  let childExited = false;
+
+  // Guards the final status write (running / error) so the healthcheck
+  // resolution and the child "close" handler can't both try to finalize
+  // the run with conflicting statuses.
+  let settled = false;
+
   let readyEmitted = false;
   const markReady = async () => {
-    if (readyEmitted) return;
+    if (readyEmitted || settled) return;
     readyEmitted = true;
+    settled = true;
     await RunModel.findByIdAndUpdate(runId, { status: "running" });
     emitBoth("run:status", { runId, status: "running" });
     startMetricsLoop(repositoryId, containerName, serviceName);
@@ -232,28 +256,29 @@ async function executeRun({
 
   // If a real healthcheck path is given, readiness is decided ENTIRELY by
   // whether that HTTP call actually succeeds — no blind fallback. A
-  // failed/timed-out healthcheck now reports "error" instead of silently
-  // being reported as "running" by the timer below, which was previously
-  // masking real startup failures (crash loops, stuck `npm install`, port
-  // never actually bound) as healthy.
-  let healthCheckFailed = false;
+  // failed/timed-out healthcheck reports "error" instead of silently being
+  // reported as "running" by the timer below, which was previously masking
+  // real startup failures as healthy.
   if (healthCheckPath) {
     void pollHealthCheck(
       `http://localhost:${appPort}${healthCheckPath}`,
       Date.now() + READINESS_TIMEOUT_MS,
+      () => childExited,
     ).then(async (ok) => {
       if (ok) {
         markReady();
-      } else {
-        healthCheckFailed = true;
-        if (!readyEmitted) {
-          await RunModel.findByIdAndUpdate(runId, {
-            status: "error",
-            errorMessage: `Healthcheck at ${healthCheckPath} did not succeed within ${READINESS_TIMEOUT_MS}ms`,
-          });
-          emitBoth("run:status", { runId, status: "error" });
-        }
+        return;
       }
+      if (settled) return; // child's own close handler already finalized this run
+      settled = true;
+      const message = childExited
+        ? "The container process exited before the healthcheck could succeed — check the run logs for a crash or a failed `npm install`."
+        : `Healthcheck at ${healthCheckPath} did not succeed within ${READINESS_TIMEOUT_MS}ms`;
+      await RunModel.findByIdAndUpdate(runId, {
+        status: "error",
+        errorMessage: message,
+      });
+      emitBoth("run:status", { runId, status: "error", message });
     });
   }
 
@@ -295,6 +320,7 @@ async function executeRun({
   }, READINESS_TIMEOUT_MS);
 
   child.on("close", async (exitCode) => {
+    childExited = true;
     const wasManualStop = activeRuns.get(runId)?.manualStop ?? false;
     activeRuns.delete(runId);
     stopMetricsLoop(repositoryId);
@@ -306,13 +332,22 @@ async function executeRun({
       : exitCode === 0
         ? "exited"
         : "error";
+    const message =
+      !wasManualStop && exitCode !== 0
+        ? `Container process exited with code ${exitCode}`
+        : undefined;
 
-    await RunModel.findByIdAndUpdate(runId, {
-      status,
-      exitCode,
-      finishedAt: new Date(),
-    });
-    emitBoth("run:status", { runId, status, exitCode });
+    if (!settled) {
+      settled = true;
+      await RunModel.findByIdAndUpdate(runId, {
+        status,
+        exitCode,
+        errorMessage: message,
+        finishedAt: new Date(),
+      });
+      emitBoth("run:status", { runId, status, exitCode, message });
+    }
+
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     await fs.rm(envFilePath, { force: true }).catch(() => {});
   });

@@ -41,12 +41,12 @@ import {
 } from "../api/repos";
 import { useTrafficStream } from "../hooks/useTrafficStream";
 import ExecutionConsole from "../components/ExecutionConsole";
-import PerformanceReportPanel from "../components/PerformanceReportPanel";
 import {
   analyzePerformance,
   applyFixAndRetest,
   type PerformanceReport,
 } from "../api/repos";// ---------------------------------------------------------------------------
+import PerformanceReportFull from "../components/PerformanceReportFull";
 // Design tokens
 // ---------------------------------------------------------------------------
 const MONO = "'Berkeley Mono', ui-monospace, monospace";
@@ -393,8 +393,17 @@ export default function ApiWorkspace() {
   useEffect(() => {
     if (!loadResult || !telemetry) return;
     if (analyzedRunRef.current === loadResult) return; // already analyzed this run
-    analyzedRunRef.current = loadResult;
 
+    // Wait for a telemetry tick whose window fully covers the completed
+    // run — the first tick after loadResult lands is often a partial
+    // window (SigNoz hasn't ingested the tail-end spans yet, or the
+    // window's `end` predates loadResult.windowEnd), which skews
+    // avg/cumulative DB numbers and can make sequential calls look like
+    // they "overlap" the request when they don't.
+    const windowCoversRun = telemetry.window.end >= loadResult.windowEnd;
+    if (!windowCoversRun) return;
+
+    analyzedRunRef.current = loadResult;
     setPerfLoading(true);
     setPerfError(null);
     analyzePerformance(repositoryId, Number(routeIndex), loadResult, telemetry)
@@ -408,7 +417,6 @@ export default function ApiWorkspace() {
       )
       .finally(() => setPerfLoading(false));
   }, [loadResult, telemetry, repositoryId, routeIndex]);
-
   // clear the "unseen report" dot once the user actually looks at the tab
   useEffect(() => {
     if (tab === "report") setReportUnseen(false);
@@ -1139,10 +1147,16 @@ export default function ApiWorkspace() {
                   )}
                 </div>
               )}
-              <PerformanceReportPanel
+              <PerformanceReportFull
+                method={route.method}
+                routePath={route.routePath}
+                loadResult={loadResult}
+                scriptRunning={scriptRunning}
+                scriptError={scriptError}
                 report={perfReport}
-                loading={perfLoading}
-                error={perfError}
+                perfLoading={perfLoading}
+                perfError={perfError}
+                telemetry={telemetry}
                 baseline={baselineResult}
                 comparison={comparisonResult}
                 comparisonLoading={comparisonLoading}
