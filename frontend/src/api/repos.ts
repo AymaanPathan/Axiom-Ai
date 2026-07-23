@@ -98,7 +98,12 @@ export interface PerformanceReport {
     description: string;
     estimatedImprovementPercent: { min: number; max: number };
   };
-  diff: { filePath: string; unifiedDiff: string } | null;
+  diff: {
+    filePath: string;
+    originalCode: string;
+    newCode: string;
+    unifiedDiff: string;
+  } | null;
   confidence: "high" | "medium" | "low";
   computed: {
     requestsSent: number;
@@ -110,6 +115,14 @@ export interface PerformanceReport {
     avgMs: number;
     errorRatePercent: number;
   };
+}
+
+export interface ApplyFixResult {
+  applied: boolean;
+  filePath?: string;
+  runResult?: LoadScriptResult;
+  telemetry?: RouteTelemetry | null;
+  error?: string;
 }
 
 /** GET /repos — list the signed-in user's GitHub repositories */
@@ -262,6 +275,22 @@ export async function analyzePerformance(
   const { data } = await apiClient.post<PerformanceReport>(
     `/repos/${repositoryId}/analyze-performance`,
     { routeIndex, runResult, telemetry },
+  );
+  return data;
+}
+
+export async function applyFixAndRetest(
+  repositoryId: string,
+  routeIndex: number,
+  filePath: string,
+  originalCode: string,
+  newCode: string,
+  script: string,
+  authToken?: string,
+): Promise<ApplyFixResult> {
+  const { data } = await apiClient.post<ApplyFixResult>(
+    `/repos/${repositoryId}/apply-fix-and-retest`,
+    { routeIndex, filePath, originalCode, newCode, script, authToken },
   );
   return data;
 }

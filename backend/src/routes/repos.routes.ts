@@ -18,15 +18,21 @@ import { generateTrafficForRoute } from "../services/trafficGenerator.service.js
 import { getRouteTelemetry } from "../services/signoz.service.js";
 import { analyzeLoadTestPerformance } from "../services/performanceAnalysis.service.js";
 import {
+  applySnippetReplace,
+  revertFile,
+} from "../services/codePatch.service.js";
+import {
   getServiceHealth,
   getSystemStatus,
   getMetricHistory,
 } from "../services/metrics-observer.service.js";
 
-import { generateLoadScript, buildEndpointMetadata } from "../services/loadScriptGenerator.service.js";
+import {
+  generateLoadScript,
+  buildEndpointMetadata,
+} from "../services/loadScriptGenerator.service.js";
 import { runLoadScript } from "../services/loadScriptRunner.service.js";
 import { detectRouteMiddlewares } from "../parsing/middleware-detect.js";
-
 
 import {
   getEndpointMetrics,
@@ -453,6 +459,7 @@ router.post("/:id/run", requireAuth, async (req: AuthedRequest, res) => {
     envVars: decrypted,
     appPort: repository.appPort,
     serviceName,
+    healthCheckPath: "/",
   });
 
   res.status(202).json({ runId, status: "starting", port: repository.appPort });
@@ -480,7 +487,8 @@ router.post("/:id/stop", requireAuth, async (req: AuthedRequest, res) => {
   const stopped = await stopDockerRun(activeRun._id.toString());
   if (!stopped) {
     return res.status(409).json({
-      error: "Run is not tracked by this server instance (may have restarted). Restart the run to stop it cleanly.",
+      error:
+        "Run is not tracked by this server instance (may have restarted). Restart the run to stop it cleanly.",
     });
   }
 
@@ -606,7 +614,7 @@ router.get(
     const repository = await RepositoryModel.findOne({
       _id: req.params.id,
       userId: req.user!.githubId,
-    }); 
+    });
     if (!repository)
       return res.status(404).json({ error: "Repository not found" });
 
@@ -759,27 +767,244 @@ router.post(
   },
 );
 
+const CONTAINER_RESTART_WAIT_MS = 2000;
+const HEALTHCHECK_RETRIES = 40; // 40 × 1500ms = 60s budget after the initial wait
+const HEALTHCHECK_INTERVAL_MS = 1500;
+const RUN_TEARDOWN_RETRIES = 15; // 15 × 500ms = 7.5s max wait for old container to fully stop
+const RUN_TEARDOWN_INTERVAL_MS = 500;
+
+// Polls both the HTTP port AND the RunModel's own status, since a fresh
+// `docker run` (npm install, framework boot, etc.) can legitimately take
+// well past what a short healthcheck window allows. We stop early and
+// successfully the moment either signal says "up".
+async function waitForRunTerminal(runId: string): Promise<void> {
+  for (let i = 0; i < RUN_TEARDOWN_RETRIES; i++) {
+    const run = await RunModel.findById(runId);
+    if (!run || ["exited", "error", "stopped"].includes(run.status)) return;
+    await new Promise((r) => setTimeout(r, RUN_TEARDOWN_INTERVAL_MS));
+  }
+  // Give up waiting for a clean confirmation either way — proceed after
+  // the max grace period rather than blocking the retest indefinitely.
+}
+
+
+const PORT_RESOLVE_RETRIES = 10;
+const PORT_RESOLVE_INTERVAL_MS = 500;
+
+// Docker may take a moment to report back the bound port after the
+// container starts. Poll the run doc briefly for it; if it never shows
+// up, fall back to the repo's configured appPort (the old behavior).
+async function resolveRunPort(
+  runId: string,
+  fallbackPort: number,
+): Promise<number> {
+  for (let i = 0; i < PORT_RESOLVE_RETRIES; i++) {
+    const run = await RunModel.findById(runId);
+    if (run?.port) return run.port;
+    if (run?.status === "error") break;
+    await new Promise((r) => setTimeout(r, PORT_RESOLVE_INTERVAL_MS));
+  }
+  return fallbackPort;
+}
+
+async function waitForAppReady(
+  port: number,
+  runId: string,
+): Promise<{ ready: boolean; lastRunStatus?: string; lastError?: string }> {
+  let lastRunStatus: string | undefined;
+  let lastError: string | undefined;
+
+  for (let i = 0; i < HEALTHCHECK_RETRIES; i++) {
+    try {
+      await fetch(`http://localhost:${port}/`, {
+        signal: AbortSignal.timeout(1500),
+      });
+      return { ready: true, lastRunStatus };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+
+    const run = await RunModel.findById(runId);
+    lastRunStatus = run?.status;
+    if (run?.status === "error") {
+      return { ready: false, lastRunStatus: "error", lastError };
+    }
+
+    await new Promise((r) => setTimeout(r, HEALTHCHECK_INTERVAL_MS));
+  }
+
+  return { ready: false, lastRunStatus, lastError };
+}
+
+// POST /repos/:id/apply-fix-and-retest — patches the real file with the
+// AI's diff, restarts the container so the change takes effect, then
+// re-runs the exact same k6 script against the patched app. Reverts the
+// file automatically if the app fails to come back up.
+router.post(
+  "/:id/apply-fix-and-retest",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    const { routeIndex, filePath, originalCode, newCode, script, authToken } =
+      req.body as {
+        routeIndex?: number;
+        filePath?: string;
+        originalCode?: string;
+        newCode?: string;
+        script?: string;
+        authToken?: string;
+      };
+
+    if (
+      routeIndex === undefined ||
+      !filePath ||
+      !originalCode ||
+      newCode === undefined ||
+      !script?.trim()
+    ) {
+      return res.status(400).json({
+        error:
+          "routeIndex, filePath, originalCode, newCode, and script are required",
+      });
+    }
+
+    const repository = await RepositoryModel.findOne({
+      _id: req.params.id,
+      userId: req.user!.githubId,
+    });
+    if (!repository)
+      return res.status(404).json({ error: "Repository not found" });
+
+    const route = repository.discoveredRoutes[routeIndex];
+    if (!route) return res.status(400).json({ error: "Unknown routeIndex" });
+
+    const repoRoot = path.resolve(repository.localPath);
+
+    // 1. Patch the real file on disk
+    const patchResult = await applySnippetReplace(
+      repoRoot,
+      filePath,
+      originalCode,
+      newCode,
+    );
+    if (!patchResult.applied) {
+      return res.status(422).json({ error: patchResult.error, applied: false });
+    }
+
+    // 2. Restart the running container so it picks up the new code
+    // 2. Restart the running container so it picks up the new code.
+    // We wait for the OLD container to actually finish tearing down
+    // before starting the new one — starting immediately after stop
+    // risks the new container failing to bind the same host port
+    // (the OS may not have released it yet), which manifests as the
+    // run status reaching "running" (from a log-line match) while the
+    // port never actually comes up.
+    const activeRun = await RunModel.findOne({
+      repositoryId: req.params.id,
+      status: { $in: ["starting", "installing", "running"] },
+    }).sort({ createdAt: -1 });
+
+    if (activeRun) {
+      await stopDockerRun(activeRun._id.toString());
+      await waitForRunTerminal(activeRun._id.toString());
+    }
+
+    const decrypted: Record<string, string> = {};
+    for (const entry of repository.envVars)
+      decrypted[entry.key] = decryptEnvValue(entry);
+    const serviceName = repository.githubFullName.split("/")[1];
+
+    const newRunId = await startDockerRun({
+      repositoryId: repository._id.toString(),
+      userId: req.user!.githubId,
+      localPath: repository.localPath,
+      envVars: decrypted,
+      appPort: repository.appPort,
+      serviceName,
+      healthCheckPath: "/",
+    });
+
+    await new Promise((r) => setTimeout(r, CONTAINER_RESTART_WAIT_MS));
+    const { ready, lastRunStatus, lastError } = await waitForAppReady(
+      repository.appPort,
+      newRunId,
+    );
+    if (!ready) {
+      if (patchResult.originalContent !== undefined) {
+        await revertFile(repoRoot, filePath, patchResult.originalContent);
+      }
+      const cause =
+        lastRunStatus === "error"
+          ? "The container exited with an error after the patch was applied — the fix likely introduced a syntax or runtime error."
+          : `Timed out waiting for the app to respond on port ${repository.appPort} (last known run status: ${lastRunStatus ?? "unknown"}${lastError ? `, last connect error: ${lastError}` : ""}).`;
+      return res.status(502).json({
+        applied: false,
+        error: `${cause} The file has been reverted automatically.`,
+      });
+    }
+
+    // 3. Re-run the exact same script against the patched, running app
+    try {
+      const runResult = await runLoadScript({
+        repositoryId: repository._id.toString(),
+        script,
+        authToken,
+      });
+
+      let telemetry = null;
+      try {
+        telemetry = await getRouteTelemetry(
+          serviceName,
+          route.method,
+          route.routePath,
+          runResult.windowStart,
+          runResult.windowEnd,
+        );
+      } catch (err) {
+        console.error("Failed to fetch post-fix telemetry:", err);
+      }
+
+      res.json({ applied: true, filePath, runResult, telemetry });
+    } catch (err) {
+      console.error("Failed to re-run load script after applying fix:", err);
+      const message =
+        err instanceof Error ? err.message : "Failed to re-run load script";
+      res.status(502).json({ applied: true, error: message });
+    }
+  },
+);
 
 // POST /repos/:id/run-load-script — execute the (possibly user-edited)
 // script with k6, streaming per-request results over the same socket
 // room/events the traffic-generator UI already listens to.
-router.post("/:id/run-load-script", requireAuth, async (req: AuthedRequest, res) => {
-  const { script } = req.body as { script?: string };
-  if (!script?.trim()) {
-    return res.status(400).json({ error: "script is required" });
-  }
+router.post(
+  "/:id/run-load-script",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    const { script } = req.body as { script?: string };
+    if (!script?.trim()) {
+      return res.status(400).json({ error: "script is required" });
+    }
 
-  const repository = await RepositoryModel.findOne({ _id: req.params.id, userId: req.user!.githubId });
-  if (!repository) return res.status(404).json({ error: "Repository not found" });
+    const repository = await RepositoryModel.findOne({
+      _id: req.params.id,
+      userId: req.user!.githubId,
+    });
+    if (!repository)
+      return res.status(404).json({ error: "Repository not found" });
 
-  try {
-    const result = await runLoadScript({ repositoryId: repository._id.toString(), script });
-    res.json(result);
-  } catch (err) {
-    console.error("Failed to run load script:", err);
-    const message = err instanceof Error ? err.message : "Failed to run load script";
-    res.status(502).json({ error: message });
-  }
-});
+    try {
+      const result = await runLoadScript({
+        repositoryId: repository._id.toString(),
+        script,
+      });
+      res.json(result);
+    } catch (err) {
+      console.error("Failed to run load script:", err);
+      const message =
+        err instanceof Error ? err.message : "Failed to run load script";
+      res.status(502).json({ error: message });
+    }
+  },
+);
 
 export default router;

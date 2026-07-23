@@ -4,6 +4,8 @@ import {
   Wrench,
   RotateCcw,
   Loader2,
+  CheckCircle2,
+  PlayCircle,
 } from "lucide-react";
 import type { PerformanceReport, LoadScriptResult } from "../api/repos";
 import DiffViewer from "./DiffViewer";
@@ -84,6 +86,10 @@ export default function PerformanceReportPanel({
   comparison,
   comparisonLoading,
   onRunAgain,
+  onApplyFix,
+  applyFixLoading,
+  applyFixError,
+  fixApplied,
 }: {
   report: PerformanceReport | null;
   loading: boolean;
@@ -92,6 +98,10 @@ export default function PerformanceReportPanel({
   comparison: LoadScriptResult | null;
   comparisonLoading: boolean;
   onRunAgain: () => void;
+  onApplyFix: () => void;
+  applyFixLoading: boolean;
+  applyFixError: string | null;
+  fixApplied: boolean;
 }) {
   if (loading) {
     return (
@@ -220,7 +230,34 @@ export default function PerformanceReportPanel({
       )}
 
       {/* Run again + before/after */}
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
+        {report.diff && !fixApplied && (
+          <button
+            onClick={onApplyFix}
+            disabled={applyFixLoading}
+            className="flex items-center gap-1.5 rounded-lg bg-white px-3.5 py-2 text-[12.5px] font-bold text-black transition-colors hover:bg-[#e5e5e5] disabled:opacity-40"
+          >
+            {applyFixLoading ? (
+              <Loader2 size={13} className="animate-spin" />
+            ) : (
+              <PlayCircle size={13} />
+            )}
+            {applyFixLoading
+              ? "Applying fix & retesting…"
+              : "Apply Fix & Re-test"}
+          </button>
+        )}
+
+        {fixApplied && (
+          <span
+            className="flex items-center gap-1.5 rounded-lg border px-3.5 py-2 text-[12.5px] font-semibold"
+            style={{ borderColor: BORDER_STRONG, color: "#7ee2a8" }}
+          >
+            <CheckCircle2 size={13} />
+            Fix applied
+          </span>
+        )}
+
         <button
           onClick={onRunAgain}
           disabled={comparisonLoading}
@@ -232,9 +269,17 @@ export default function PerformanceReportPanel({
           ) : (
             <RotateCcw size={13} />
           )}
-          {comparisonLoading ? "Running benchmark…" : "Run Benchmark Again"}
+          {comparisonLoading
+            ? "Running benchmark…"
+            : "Run Benchmark Again (no changes)"}
         </button>
       </div>
+
+      {applyFixError && (
+        <p className="mt-2.5 text-[12.5px]" style={{ color: "#f29b9b" }}>
+          {applyFixError}
+        </p>
+      )}
 
       {comparison && baseline && (
         <div className="mt-4">

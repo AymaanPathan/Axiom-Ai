@@ -1,5 +1,6 @@
 import type { RouteTelemetry } from "./signoz.service.js";
 import type { LoadScriptResult } from "./loadScriptRunner.service.js";
+import { buildDisplayDiff } from "./codePatch.service.js";
 
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 const GROQ_MODEL = "llama-3.3-70b-versatile";
@@ -14,7 +15,12 @@ export interface PerformanceReport {
     description: string;
     estimatedImprovementPercent: { min: number; max: number };
   };
-  diff: { filePath: string; unifiedDiff: string } | null;
+  diff: {
+    filePath: string;
+    originalCode: string;
+    newCode: string;
+    unifiedDiff: string; // display-only, generated locally from the two snippets above
+  } | null;
   confidence: "high" | "medium" | "low";
   // computed metrics, echoed back so the frontend never has to re-derive them
   computed: ComputedMetrics;
@@ -100,7 +106,11 @@ function buildPrompt(
     "description": string,      // 2-4 sentences, concrete, referencing the actual code below
     "estimatedImprovementPercent": { "min": number, "max": number }
   },
-  "diff": { "filePath": string, "unifiedDiff": string } | null,  // a real unified diff (@@ hunks, -/+ lines) against the ACTUAL code shown below. null only if no code-level fix applies (e.g. the bottleneck is external/network, not this codebase).
+  "diff": { "filePath": string, "originalCode": string, "newCode": string } | null,
+  // "originalCode" MUST be copied EXACTLY, character-for-character (including indentation/whitespace),
+  // from the source code shown below — a short contiguous snippet (a few lines to ~1 function), not the
+  // whole file, and not paraphrased or reformatted in any way. "newCode" is your replacement for that
+  // exact snippet. null only if no code-level fix applies (e.g. the bottleneck is external/network, not this codebase).
   "confidence": "high" | "medium" | "low"
 }
 
@@ -124,7 +134,7 @@ Rules:
 2. If DB spans-per-request is close to 1 but latency is still high, look for missing indexes, oversized payloads, or unbounded queries (no .limit()) in the code instead — don't call it N+1 if it isn't.
 3. If external-call time share dominates, the fix is about caching/parallelizing/timeout tuning on that call, not the database.
 4. Evidence bullets must each cite a real number from above. Do not fabricate span counts, percentages, or line references not present in the code.
-5. The diff must be a minimal, realistic patch to the actual file/function shown — not a rewrite of the whole file.
+5. "originalCode" must be an exact, verbatim substring of the source shown above — copy-paste it, do not retype or reformat it, or the patch cannot be located and applied. Keep it as short as possible while still being unique in the file (a whole function is usually right; the whole file is not).
 6. estimatedImprovementPercent should be a defensible range given the % of time share you're eliminating (e.g. if DB is 82% of request time and you're collapsing N calls into 1, 60-80% is defensible; don't invent an unrelated number).`;
 }
 
@@ -187,5 +197,15 @@ export async function analyzeLoadTestPerformance(opts: {
     throw new Error("Failed to parse AI analysis as JSON");
   }
 
-  return { ...parsed, computed };
+  let diff = parsed.diff;
+  if (diff) {
+    const unifiedDiff = buildDisplayDiff(
+      diff.filePath,
+      diff.originalCode,
+      diff.newCode,
+    );
+    diff = { ...diff, unifiedDiff };
+  }
+
+  return { ...parsed, diff, computed };
 }

@@ -230,12 +230,30 @@ async function executeRun({
     startMetricsLoop(repositoryId, containerName, serviceName);
   };
 
+  // If a real healthcheck path is given, readiness is decided ENTIRELY by
+  // whether that HTTP call actually succeeds — no blind fallback. A
+  // failed/timed-out healthcheck now reports "error" instead of silently
+  // being reported as "running" by the timer below, which was previously
+  // masking real startup failures (crash loops, stuck `npm install`, port
+  // never actually bound) as healthy.
+  let healthCheckFailed = false;
   if (healthCheckPath) {
     void pollHealthCheck(
       `http://localhost:${appPort}${healthCheckPath}`,
       Date.now() + READINESS_TIMEOUT_MS,
-    ).then((ok) => {
-      if (ok) markReady();
+    ).then(async (ok) => {
+      if (ok) {
+        markReady();
+      } else {
+        healthCheckFailed = true;
+        if (!readyEmitted) {
+          await RunModel.findByIdAndUpdate(runId, {
+            status: "error",
+            errorMessage: `Healthcheck at ${healthCheckPath} did not succeed within ${READINESS_TIMEOUT_MS}ms`,
+          });
+          emitBoth("run:status", { runId, status: "error" });
+        }
+      }
     });
   }
 
@@ -267,8 +285,13 @@ async function executeRun({
     emitServiceLog("stderr", text);
   });
 
+  // Fallback timer ONLY applies when there's no real healthcheck to trust
+  // (i.e. we're relying on the stdout regex match instead). When a real
+  // healthCheckPath was given, its own resolution above is authoritative —
+  // this timer must not override a pending/failed healthcheck with a fake
+  // "running" status.
   setTimeout(() => {
-    if (!readyEmitted) markReady();
+    if (!readyEmitted && !healthCheckPath) markReady();
   }, READINESS_TIMEOUT_MS);
 
   child.on("close", async (exitCode) => {

@@ -42,8 +42,11 @@ import {
 import { useTrafficStream } from "../hooks/useTrafficStream";
 import ExecutionConsole from "../components/ExecutionConsole";
 import PerformanceReportPanel from "../components/PerformanceReportPanel";
-import { analyzePerformance, type PerformanceReport } from "../api/repos";
-// ---------------------------------------------------------------------------
+import {
+  analyzePerformance,
+  applyFixAndRetest,
+  type PerformanceReport,
+} from "../api/repos";// ---------------------------------------------------------------------------
 // Design tokens
 // ---------------------------------------------------------------------------
 const MONO = "'Berkeley Mono', ui-monospace, monospace";
@@ -336,27 +339,16 @@ export default function ApiWorkspace() {
     useState<LoadScriptResult | null>(null);
   const [comparisonLoading, setComparisonLoading] = useState(false);
   const analyzedRunRef = useRef<LoadScriptResult | null>(null);
+  const [applyFixLoading, setApplyFixLoading] = useState(false);
+  const [applyFixError, setApplyFixError] = useState<string | null>(null);
+  const [fixApplied, setFixApplied] = useState(false);
   // --- execution console visibility (only opens when a run starts) ---
   const [consoleOpen, setConsoleOpen] = useState(false);
   const [consoleExpanded, setConsoleExpanded] = useState(false);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // A "report" exists once we have run results, live telemetry, or a run
-  // failure to show. The Report tab only appears once one of these is true.
-  const hasReport = !!(
-    loadResult ||
-    telemetry ||
-    pollRef.current ||
-    (scriptError && !scriptLoading && script === null
-      ? false
-      : scriptError &&
-          loadResult === null &&
-          scriptRunning === false &&
-          pollRef.current === null
-        ? false
-        : false)
-  );
+
   const reportAvailable = !!(
     loadResult ||
     telemetry ||
@@ -480,6 +472,8 @@ export default function ApiWorkspace() {
     setBaselineResult(null);
     setComparisonResult(null);
     analyzedRunRef.current = null;
+    setApplyFixError(null);
+    setFixApplied(false);
     try {
       const result = await generateLoadScript(
         repositoryId,
@@ -545,6 +539,61 @@ export default function ApiWorkspace() {
       );
     } finally {
       setComparisonLoading(false);
+    }
+  };
+
+
+  const handleApplyFix = async () => {
+    if (!repo || !script || !perfReport?.diff) return;
+    setApplyFixLoading(true);
+    setApplyFixError(null);
+
+    // Same treatment as a fresh run: clear the console and telemetry chart
+    // so the retest's output isn't mixed in with the baseline run's, and
+    // make sure the console panel is actually visible to show it live.
+    reset();
+    setConsoleOpen(true);
+    setTelemetry(null);
+    setChartData([]);
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+
+    try {
+      const result = await applyFixAndRetest(
+        repositoryId,
+        Number(routeIndex),
+        perfReport.diff.filePath,
+        perfReport.diff.originalCode,
+        perfReport.diff.newCode,
+        script,
+        authToken.trim() || undefined,
+      );
+      if (!result.applied || !result.runResult) {
+        setApplyFixError(result.error ?? "Failed to apply fix");
+        return;
+      }
+      setComparisonResult(result.runResult);
+      setFixApplied(true);
+
+      // Restart live polling against the NEW run's window, same as a
+      // normal run — a single one-shot telemetry snapshot (result.telemetry)
+      // undersells what actually happened, since the run already streamed
+      // per-request logs into the console via the socket while it executed.
+      const serviceName = repo.githubFullName.split("/")[1];
+      pollTelemetry(
+        result.runResult.windowStart,
+        result.runResult.windowEnd,
+        serviceName,
+      );
+    } catch (err: any) {
+      setApplyFixError(
+        err?.response?.data?.error ??
+          (err instanceof Error ? err.message : "Failed to apply fix"),
+      );
+    } finally {
+      setApplyFixLoading(false);
     }
   };
 
@@ -1098,6 +1147,10 @@ export default function ApiWorkspace() {
                 comparison={comparisonResult}
                 comparisonLoading={comparisonLoading}
                 onRunAgain={handleRunAgain}
+                onApplyFix={handleApplyFix}
+                applyFixLoading={applyFixLoading}
+                applyFixError={applyFixError}
+                fixApplied={fixApplied}
               />
             </section>
           )}
