@@ -763,3 +763,131 @@ export async function getRouteTelemetry(
 function windowLabel(start: number, end: number): string {
   return `${new Date(start).toISOString()}..${new Date(end).toISOString()} (${end - start}ms)`;
 }
+
+export const CONTAINER_NAME_ATTRIBUTE = "container.name";
+
+export interface MetricAggregation {
+  metricName: string;
+  timeAggregation: string; // "avg" | "latest" | "rate" | ...
+  spaceAggregation: string; // "avg" | "sum" | "max" | ...
+  reduceTo?: string; // collapses the window to one scalar, e.g. "last"
+}
+
+export async function runScalarMetricQuery(
+  start: number,
+  end: number,
+  filterExpression: string,
+  aggregation: MetricAggregation,
+): Promise<unknown> {
+  const { baseUrl, apiKey } = getConfig();
+
+  const body = {
+    start,
+    end,
+    requestType: "scalar",
+    compositeQuery: {
+      queries: [
+        {
+          type: "builder_query",
+          spec: {
+            name: "A",
+            signal: "metrics",
+            aggregations: [aggregation],
+            filter: { expression: filterExpression },
+            disabled: false,
+          },
+        },
+      ],
+    },
+  };
+
+  debugLog(
+    "--> [metric]",
+    `window ${new Date(start).toISOString()} .. ${new Date(end).toISOString()}`,
+    `(${end - start}ms span)`,
+  );
+  debugLog("--> [metric] filter:", filterExpression);
+  debugLog("--> [metric] aggregation:", JSON.stringify(aggregation));
+  console.log(
+    "[SigNoz] metric scalar query -->",
+    aggregation.metricName,
+    filterExpression,
+  );
+
+  let res: Response;
+  try {
+    res = await enqueueSignozCall(() =>
+      fetch(`${baseUrl}/api/v5/query_range`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "SIGNOZ-API-KEY": apiKey,
+        },
+        body: JSON.stringify(body),
+      }),
+    );
+  } catch (networkErr) {
+    console.error(
+      "[SigNoz] NETWORK ERROR calling query_range (metric scalar):",
+      networkErr instanceof Error ? networkErr.message : networkErr,
+    );
+    throw networkErr;
+  }
+
+  const rawText = await res.text();
+
+  if (!res.ok) {
+    console.error(
+      `[SigNoz] API ERROR ${res.status} on metric scalar query:`,
+      rawText.slice(0, 500),
+    );
+    debugLog("<-- ERROR", res.status, rawText.slice(0, 500));
+    throw new Error(
+      `SigNoz API error (${res.status}): ${rawText.slice(0, 300)}`,
+    );
+  }
+
+  debugLog("<-- [metric] 200 OK, raw body:", rawText.slice(0, 1000));
+  console.log("[SigNoz] metric scalar query <-- 200 OK");
+
+  try {
+    return JSON.parse(rawText);
+  } catch (parseErr) {
+    console.error(
+      "[SigNoz] JSON PARSE ERROR on metric scalar response:",
+      parseErr instanceof Error ? parseErr.message : parseErr,
+      "raw:",
+      rawText.slice(0, 500),
+    );
+    throw parseErr;
+  }
+}
+
+export async function runScalarMetricQuerySafe(
+  start: number,
+  end: number,
+  filterExpression: string,
+  aggregation: MetricAggregation,
+  label: string,
+  warnings: string[],
+): Promise<unknown> {
+  debugLog(`=== [${label}] running ===`);
+  console.log(`[SigNoz] [${label}] starting metric scalar query`);
+  try {
+    const result = await runScalarMetricQuery(
+      start,
+      end,
+      filterExpression,
+      aggregation,
+    );
+    debugLog(`=== [${label}] succeeded ===`);
+    console.log(`[SigNoz] [${label}] succeeded`);
+    return result;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    debugLog(`=== [${label}] FAILED:`, message, "===");
+    console.error(`[SigNoz] [${label}] FAILED:`, message);
+    warnings.push(`${label}: ${message}`);
+    return null;
+  }
+}

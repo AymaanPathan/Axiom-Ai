@@ -8,16 +8,23 @@
 // cannot read SigNoz v5 scalar responses (see signoz.service.ts header for
 // why). Switched to extractScalarValues(), which reads by position instead
 // of by alias-as-object-key.
+//
+// CONTAINER METRICS: cpuPercent/memoryMB previously came from spawning
+// `docker stats` as a subprocess. Replaced with SigNoz queries against the
+// OTel Collector's `docker_stats` receiver (see signoz.io/docs/metrics-
+// management/docker-container-metrics) — requires that receiver running
+// against the Docker socket and exporting to this SigNoz instance.
 
-import { spawn } from "node:child_process";
 import mongoose from "mongoose";
 import { getIO } from "../config/socket.js";
 import { RunModel } from "../models/run.model.js";
 import {
   runScalarTraceQuerySafe,
+  runScalarMetricQuerySafe,
   extractScalarValues,
   SERVICE_ATTRIBUTE,
   DURATION_ATTRIBUTE,
+  CONTAINER_NAME_ATTRIBUTE,
   nanoToMs,
 } from "./signoz.service.js";
 
@@ -64,48 +71,79 @@ interface RepoLoopState {
 
 const loops = new Map<string, RepoLoopState>();
 
-// --- docker stats -----------------------------------------------------
+// --- SigNoz container resource metrics (replaces `docker stats`) -------
+//
+// Needs the OTel Collector's `docker_stats` receiver running against the
+// Docker socket and exporting to SigNoz. `container.cpu.utilization` is a
+// 0..1 gauge (Docker's %CPU / 100). `container.memory.usage.total` is
+// bytes and excludes cache, matching what `docker stats` shows as
+// MemUsage. Both are keyed by the `container.name` resource attribute.
+//
+// NOTE: if this comes back empty/zero, check how `container.name` is
+// actually populated for your containers in SigNoz's explorer — Docker's
+// own API returns names with a leading "/", and depending on collector
+// version that may or may not be stripped before ingestion.
+const CONTAINER_METRIC_WINDOW_MS = 30_000; // must exceed the collector's scrape interval
 
-function parseMemToMB(raw: string): number {
-  // raw like "12.5MiB" or "1.2GiB" or "512KiB" or "300B"
-  const match = raw.match(/([\d.]+)\s*([KMG]?i?B)/i);
-  if (!match) return 0;
-  const value = parseFloat(match[1]);
-  const unit = match[2].toUpperCase();
-  if (unit.startsWith("G")) return value * 1024;
-  if (unit.startsWith("K")) return value / 1024;
-  if (unit.startsWith("B") && !unit.startsWith("M")) return value / 1024 / 1024;
-  return value; // MiB
-}
-
-function getDockerStats(
+async function getContainerResourceMetrics(
   containerName: string,
 ): Promise<{ cpuPercent: number; memoryMB: number } | null> {
-  return new Promise((resolve) => {
-    const proc = spawn("docker", [
-      "stats",
-      containerName,
-      "--no-stream",
-      "--format",
-      "{{json .}}",
-    ]);
-    let output = "";
-    proc.stdout.on("data", (d) => (output += d.toString()));
-    proc.on("close", (code) => {
-      if (code !== 0 || !output.trim()) return resolve(null);
-      try {
-        const parsed = JSON.parse(output.trim());
-        const cpuPercent = parseFloat(
-          String(parsed.CPUPerc ?? "0").replace("%", ""),
-        );
-        const memRaw = String(parsed.MemUsage ?? "0MiB / 0MiB").split(" / ")[0];
-        resolve({ cpuPercent, memoryMB: parseMemToMB(memRaw) });
-      } catch {
-        resolve(null);
-      }
-    });
-    proc.on("error", () => resolve(null));
-  });
+  const end = Date.now();
+  const start = end - CONTAINER_METRIC_WINDOW_MS;
+  const warnings: string[] = [];
+  const escapedName = containerName.replace(/'/g, "\\'");
+  const filter = `${CONTAINER_NAME_ATTRIBUTE} = '${escapedName}'`;
+
+  const [cpuRaw, memRaw] = await Promise.all([
+    runScalarMetricQuerySafe(
+      start,
+      end,
+      filter,
+      {
+        metricName: "container.cpu.utilization",
+        timeAggregation: "avg",
+        spaceAggregation: "avg",
+        reduceTo: "last",
+      },
+      "container CPU utilization",
+      warnings,
+    ),
+    runScalarMetricQuerySafe(
+      start,
+      end,
+      filter,
+      {
+        metricName: "container.memory.usage.total",
+        timeAggregation: "avg",
+        spaceAggregation: "avg",
+        reduceTo: "last",
+      },
+      "container memory usage",
+      warnings,
+    ),
+  ]);
+
+  if (warnings.length > 0) {
+    console.warn(
+      `[MetricsObserver] getContainerResourceMetrics(${containerName}) warnings:`,
+      warnings,
+    );
+  }
+
+  const cpuValues = extractScalarValues(cpuRaw, [{ alias: "value" }]);
+  const memValues = extractScalarValues(memRaw, [{ alias: "value" }]);
+
+  const cpuFraction = cpuValues.value; // 0..1
+  const memBytes = memValues.value;
+
+  if (cpuFraction === null && memBytes === null) return null;
+
+  return {
+    cpuPercent:
+      cpuFraction !== null ? Math.round(cpuFraction * 10000) / 100 : 0,
+    memoryMB:
+      memBytes !== null ? Math.round((memBytes / 1024 / 1024) * 100) / 100 : 0,
+  };
 }
 
 // --- SigNoz aggregate (whole service, no route filter) ----------------
@@ -182,7 +220,7 @@ export function startMetricsLoop(
     history: [],
     intervalHandle: setInterval(async () => {
       const [stats, aggregate] = await Promise.all([
-        getDockerStats(containerName),
+        getContainerResourceMetrics(containerName).catch(() => null),
         getServiceAggregate(serviceName, AGGREGATE_WINDOW_MS).catch(() => ({
           requestRate: 0,
           errorRate: 0,

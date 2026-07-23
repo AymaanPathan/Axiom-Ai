@@ -40,13 +40,13 @@ import {
   type ConnectedFile,
 } from "../api/repos";
 import { useTrafficStream } from "../hooks/useTrafficStream";
-import ExecutionConsole from "../components/ExecutionConsole";
 import {
   analyzePerformance,
   applyFixAndRetest,
   type PerformanceReport,
-} from "../api/repos";// ---------------------------------------------------------------------------
+} from "../api/repos";
 import PerformanceReportFull from "../components/PerformanceReportFull";
+// ---------------------------------------------------------------------------
 // Design tokens
 // ---------------------------------------------------------------------------
 const MONO = "'Berkeley Mono', ui-monospace, monospace";
@@ -62,10 +62,8 @@ const TEXT_SECONDARY = "#b3b3b3";
 const TEXT_TERTIARY = "#6e6e6e";
 const TEXT_QUIET = "#4a4a4a";
 
-const CONTENT_WIDTH = "max-w-[1240px]";
-
-const CONSOLE_WIDTH_NARROW = 400;
-const CONSOLE_WIDTH_WIDE = 720;
+const CONSOLE_WIDTH_NARROW = 320;
+const CONSOLE_WIDTH_WIDE = 440;
 
 const TELEMETRY_POLL_MS = 2000;
 const TELEMETRY_POLL_DURATION_MS = 20_000;
@@ -348,7 +346,6 @@ export default function ApiWorkspace() {
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-
   const reportAvailable = !!(
     loadResult ||
     telemetry ||
@@ -375,13 +372,6 @@ export default function ApiWorkspace() {
       })
       .catch(() => setConnected(null));
   }, [repositoryId, route?.file, route?.line]);
-
-  useEffect(
-    () => () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    },
-    [],
-  );
 
   useEffect(
     () => () => {
@@ -417,6 +407,7 @@ export default function ApiWorkspace() {
       )
       .finally(() => setPerfLoading(false));
   }, [loadResult, telemetry, repositoryId, routeIndex]);
+
   // clear the "unseen report" dot once the user actually looks at the tab
   useEffect(() => {
     if (tab === "report") setReportUnseen(false);
@@ -550,7 +541,6 @@ export default function ApiWorkspace() {
     }
   };
 
-
   const handleApplyFix = async () => {
     if (!repo || !script || !perfReport?.diff) return;
     setApplyFixLoading(true);
@@ -634,638 +624,656 @@ export default function ApiWorkspace() {
   }
 
   return (
-    // Fixed-height, non-scrolling shell. `overflow-hidden` here is the key
-    // fix: without it, anything inside that overflows drags the *whole
-    // page* into scroll (composer included). Only the content region below
-    // scrolls; header, tabs, and the composer stay pinned in the viewport.
-    // h-[100dvh] instead of h-screen so mobile browser chrome doesn't clip it.
+    // Root is a flex ROW: main column + console panel as real flex
+    // siblings. No marginRight hack — the console only ever takes the
+    // width it's actually given, and the main column just shrinks to
+    // fill whatever's left. h-[100dvh] instead of h-screen so mobile
+    // browser chrome doesn't clip it.
     <div
-      className="flex h-[100dvh] flex-col overflow-hidden"
-      style={{
-        fontFamily: SANS,
-        background: BG,
-        marginRight: consoleOpen ? consoleWidth : 0,
-        transition: "margin-right 160ms ease",
-      }}
+      className="flex h-[100dvh] overflow-hidden"
+      style={{ fontFamily: SANS, background: BG }}
     >
-      {/* --------------------------------------------------------- */}
-      {/* Header                                                     */}
-      {/* --------------------------------------------------------- */}
-      <header className={`mx-auto w-full ${CONTENT_WIDTH} shrink-0 px-8 pt-6`}>
-        <div className="flex flex-wrap items-center gap-3">
-          <span
-            className="ml-auto flex items-center gap-2 text-[12px]"
-            style={{ color: isLivePolling ? TEXT_PRIMARY : TEXT_QUIET }}
-          >
-            <Radio size={13} />
-            {isBusy ? "Sending traffic" : isLivePolling ? "Live" : "Idle"}
-          </span>
-        </div>
-
+      {/* ======================================================= */}
+      {/* Main column                                               */}
+      {/* ======================================================= */}
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {/* --------------------------------------------------------- */}
-        {/* Tabs                                                       */}
+        {/* Header                                                     */}
         {/* --------------------------------------------------------- */}
-        <div
-          className="flex items-center gap-6 border-b"
-          style={{ borderColor: BORDER }}
-        >
-          <TabButton
-            active={tab === "overview"}
-            onClick={() => setTab("overview")}
-          >
-            Overview
-          </TabButton>
-          <TabButton active={tab === "source"} onClick={() => setTab("source")}>
-            Source &amp; Schema
-          </TabButton>
-          <TabButton active={tab === "script"} onClick={() => setTab("script")}>
-            Script
-          </TabButton>
-          {reportAvailable && (
-            <TabButton
-              active={tab === "report"}
-              onClick={() => setTab("report")}
-              dot={reportUnseen}
+        <header className="w-full shrink-0 px-8 pt-6">
+          <div className="flex flex-wrap items-center gap-3">
+            <span
+              className="ml-auto flex items-center gap-2 text-[12px]"
+              style={{ color: isLivePolling ? TEXT_PRIMARY : TEXT_QUIET }}
             >
-              Report
+              <Radio size={13} />
+              {isBusy ? "Sending traffic" : isLivePolling ? "Live" : "Idle"}
+            </span>
+          </div>
+
+          {/* --------------------------------------------------------- */}
+          {/* Tabs                                                       */}
+          {/* --------------------------------------------------------- */}
+          <div
+            className="flex items-center gap-6 border-b"
+            style={{ borderColor: BORDER }}
+          >
+            <TabButton
+              active={tab === "overview"}
+              onClick={() => setTab("overview")}
+            >
+              Overview
             </TabButton>
-          )}
-        </div>
-      </header>
+            <TabButton
+              active={tab === "source"}
+              onClick={() => setTab("source")}
+            >
+              Source &amp; Schema
+            </TabButton>
+            <TabButton
+              active={tab === "script"}
+              onClick={() => setTab("script")}
+            >
+              Script
+            </TabButton>
+            {reportAvailable && (
+              <TabButton
+                active={tab === "report"}
+                onClick={() => setTab("report")}
+                dot={reportUnseen}
+              >
+                Report
+              </TabButton>
+            )}
+          </div>
+        </header>
 
-      {/* --------------------------------------------------------- */}
-      {/* Scrollable content region — the only part of the page that */}
-      {/* scrolls; header, tabs, and composer stay fixed in place.   */}
-      {/* --------------------------------------------------------- */}
-      <div
-        className="min-h-0 flex-1 overflow-y-auto"
-        style={{ paddingBottom: COMPOSER_HEIGHT }}
-      >
+        {/* --------------------------------------------------------- */}
+        {/* Scrollable content region — the only part of the page that */}
+        {/* scrolls; header, tabs, and composer stay fixed in place.   */}
+        {/* --------------------------------------------------------- */}
         <div
-          className={`mx-auto flex w-full ${CONTENT_WIDTH} flex-col px-8 py-6`}
+          className="min-h-0 flex-1 overflow-y-auto"
+          style={{ paddingBottom: COMPOSER_HEIGHT }}
         >
-          {/* Overview tab */}
-          {tab === "overview" && (
-            <section className="grid grid-cols-1 gap-10 lg:grid-cols-[1fr_320px]">
-              <div>
-                <Eyebrow
-                  action={
-                    <button
-                      onClick={() => {
-                        setExplanationLoading(true);
-                        getExplanation(repositoryId, route.file, route.line)
-                          .then(setExplanation)
-                          .finally(() => setExplanationLoading(false));
-                      }}
-                      className="flex items-center gap-1.5 text-[11.5px] font-medium transition-colors"
-                      style={{ color: TEXT_TERTIARY }}
-                    >
-                      <RefreshCw
-                        size={12}
-                        className={explanationLoading ? "animate-spin" : ""}
-                      />
-                      Regenerate
-                    </button>
-                  }
-                >
-                  What this endpoint does
-                </Eyebrow>
-                {explanationLoading ? (
-                  <div className="space-y-2.5">
-                    <div className="h-3.5 w-[92%] animate-pulse rounded bg-[#161616]" />
-                    <div className="h-3.5 w-[76%] animate-pulse rounded bg-[#161616]" />
-                    <div className="h-3.5 w-[54%] animate-pulse rounded bg-[#161616]" />
-                  </div>
-                ) : (
-                  <p
-                    className="text-[14px] leading-[1.75]"
-                    style={{ color: TEXT_SECONDARY }}
-                  >
-                    {explanation ?? "No explanation available yet."}
-                  </p>
-                )}
-              </div>
-
-              {connected && connected.files.length > 0 && (
-                <div>
-                  <Eyebrow>Call chain</Eyebrow>
-                  <nav className="flex flex-col gap-2">
-                    {connected.files.map((f) => {
-                      const meta = ROLE_META[f.role];
-                      const Icon = meta.icon;
-                      return (
-                        <button
-                          key={f.path}
-                          onClick={() => {
-                            setActiveFile(f);
-                            setTab("source");
-                          }}
-                          className="flex items-center gap-2 rounded-lg border px-3 py-2 text-[12.5px] transition-colors"
-                          style={{ borderColor: BORDER, color: TEXT_TERTIARY }}
-                        >
-                          <Icon size={13} className="shrink-0" />
-                          <span className="shrink-0">{meta.label}</span>
-                          <span
-                            className="truncate text-[11.5px] opacity-70"
-                            style={{ fontFamily: MONO }}
-                          >
-                            {f.path.split("/").pop()}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </nav>
-                </div>
-              )}
-            </section>
-          )}
-
-          {/* Source & Schema tab */}
-          {tab === "source" && (
-            <section className="grid grid-cols-1 gap-8 lg:grid-cols-[1fr_280px]">
-              <div>
-                {connected && connected.files.length > 0 && (
-                  <nav className="mb-4 flex flex-wrap items-center gap-2">
-                    {connected.files.map((f) => {
-                      const meta = ROLE_META[f.role];
-                      const Icon = meta.icon;
-                      const isActive = activeFile?.path === f.path;
-                      return (
-                        <button
-                          key={f.path}
-                          onClick={() => setActiveFile(f)}
-                          className={
-                            isActive
-                              ? "flex items-center gap-2 rounded-lg bg-white px-3 py-1.5 text-[12.5px] font-semibold text-black"
-                              : "flex items-center gap-2 rounded-lg border px-3 py-1.5 text-[12.5px] transition-colors"
-                          }
-                          style={
-                            isActive
-                              ? undefined
-                              : { borderColor: BORDER, color: TEXT_TERTIARY }
-                          }
-                        >
-                          <Icon size={13} />
-                          {meta.label}
-                          <span
-                            className="max-w-[150px] truncate text-[11.5px] opacity-70"
-                            style={{ fontFamily: MONO }}
-                          >
-                            {f.path.split("/").pop()}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </nav>
-                )}
-
-                <div
-                  className="overflow-hidden rounded-xl border"
-                  style={{ borderColor: BORDER, background: "#0d0d0d" }}
-                >
-                  <div
-                    className="flex items-center justify-between border-b px-5 py-3"
-                    style={{ borderColor: BORDER }}
-                  >
-                    <div
-                      className="flex items-center gap-2.5 text-[13px]"
-                      style={{ color: TEXT_SECONDARY }}
-                    >
-                      {activeFile && (
-                        <>
-                          {(() => {
-                            const Icon = ROLE_META[activeFile.role].icon;
-                            return (
-                              <Icon
-                                size={14}
-                                style={{ color: TEXT_TERTIARY }}
-                              />
-                            );
-                          })()}
-                          <span style={{ fontFamily: MONO }}>
-                            {activeFile.path}
-                          </span>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                  <div className="max-h-[55vh] overflow-auto px-3">
-                    {activeFile ? (
-                      <CodeBlock
-                        code={activeFile.content}
-                        filePath={activeFile.path}
-                        startLine={activeFile.startLine}
-                        highlightLine={activeFile.highlightLine}
-                      />
-                    ) : (
-                      <p
-                        className="px-4 py-8 text-[13px]"
-                        style={{ color: TEXT_QUIET }}
-                      >
-                        {connected === null
-                          ? "Loading source…"
-                          : "No source available for this file."}
-                      </p>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              <div>
-                <Eyebrow>Request body</Eyebrow>
-                {connected?.requestBodyFields.length ? (
-                  <div
-                    className="overflow-hidden rounded-lg border"
-                    style={{ borderColor: BORDER }}
-                  >
-                    {connected.requestBodyFields.map((f, i) => (
-                      <div
-                        key={f}
-                        className="flex items-center justify-between px-3.5 py-2.5 text-[12.5px]"
-                        style={{
-                          borderTop: i > 0 ? `1px solid ${BORDER}` : undefined,
-                        }}
-                      >
-                        <span style={{ fontFamily: MONO, color: TEXT_PRIMARY }}>
-                          {f}
-                        </span>
-                        <span
-                          className="rounded border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.06em]"
-                          style={{
-                            borderColor: BORDER_STRONG,
-                            color: TEXT_TERTIARY,
-                          }}
-                        >
-                          field
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p
-                    className="text-[12.5px] leading-[1.7]"
-                    style={{ color: TEXT_QUIET }}
-                  >
-                    No{" "}
-                    <code style={{ fontFamily: MONO, color: TEXT_SECONDARY }}>
-                      req.body
-                    </code>{" "}
-                    usage found — this handler likely doesn't read a request
-                    body (e.g. a GET/list route).
-                  </p>
-                )}
-              </div>
-            </section>
-          )}
-
-          {/* Script tab — the generated k6 code. Full width, fills the */}
-          {/* available height instead of being capped/split in half.   */}
-          {tab === "script" && (
-            <section className="flex flex-1 flex-col">
-              {!script && !scriptError && (
-                <p className="text-[13px]" style={{ color: TEXT_QUIET }}>
-                  Nothing here yet — describe a scenario below and hit Generate.
-                </p>
-              )}
-
-              {scriptError && !script && (
-                <div className="mb-6">
-                  <InvertChip icon={X}>{scriptError}</InvertChip>
-                </div>
-              )}
-
-              {script && (
-                <div
-                  className="flex min-h-[60vh] flex-1 flex-col overflow-hidden rounded-xl border text-left"
-                  style={{ borderColor: BORDER, background: "#0d0d0d" }}
-                >
-                  <div
-                    className="flex shrink-0 items-center justify-between border-b px-3.5 py-2.5"
-                    style={{ borderColor: BORDER }}
-                  >
-                    <span
-                      className="text-[11px] font-semibold uppercase tracking-[0.06em]"
-                      style={{ color: TEXT_TERTIARY }}
-                    >
-                      Generated test · k6
-                    </span>
-                    <button
-                      onClick={() => setScriptEditing((e) => !e)}
-                      className="rounded-md px-1.5 py-0.5 text-[11.5px] font-medium transition-colors"
-                      style={{ color: TEXT_SECONDARY }}
-                    >
-                      {scriptEditing ? "Done" : "Edit"}
-                    </button>
-                  </div>
-                  {scriptEditing ? (
-                    <textarea
-                      value={script}
-                      onChange={(e) => setScript(e.target.value)}
-                      spellCheck={false}
-                      className="w-full flex-1 resize-none bg-transparent px-3.5 py-3 text-[12.5px] leading-[1.7] outline-none"
-                      style={{ fontFamily: MONO, color: TEXT_SECONDARY }}
-                    />
-                  ) : (
-                    <div className="flex-1 overflow-auto px-2.5">
-                      <CodeBlock code={script} filePath="script.js" />
-                    </div>
-                  )}
-                </div>
-              )}
-            </section>
-          )}
-
-          {/* Report tab — run stats + live telemetry. Only mounted when */}
-          {/* there's actually a report to show (see reportAvailable).   */}
-          {tab === "report" && reportAvailable && (
-            <section>
-              {scriptError && (
-                <div className="mb-6">
-                  <InvertChip icon={X}>{scriptError}</InvertChip>
-                </div>
-              )}
-
-              {progress && progress.status !== "done" && (
-                <p
-                  className="mb-3 text-[11.5px]"
-                  style={{ color: TEXT_TERTIARY }}
-                >
-                  {progress.status === "starting"
-                    ? "Starting k6…"
-                    : `${progress.sent} requests sent so far…`}
-                </p>
-              )}
-
-              {loadResult && (
-                <div className="mb-8">
-                  <Eyebrow>Run results</Eyebrow>
-                  <div className="grid grid-cols-3 gap-2.5">
-                    <StatBlock label="Total" value={loadResult.requestsSent} />
-                    <StatBlock
-                      label="Errors"
-                      value={`${(loadResult.errorRate * 100).toFixed(1)}%`}
-                      alert={loadResult.errorRate > 0.01}
-                    />
-                    <StatBlock
-                      label="Avg"
-                      value={`${Math.round(loadResult.avgDurationMs)}ms`}
-                    />
-                    <StatBlock
-                      label="p95"
-                      value={
-                        loadResult.p95DurationMs !== null
-                          ? `${Math.round(loadResult.p95DurationMs)}ms`
-                          : "—"
-                      }
-                    />
-                    <StatBlock
-                      label="p99"
-                      value={
-                        loadResult.p99DurationMs !== null
-                          ? `${Math.round(loadResult.p99DurationMs)}ms`
-                          : "—"
-                      }
-                    />
-                    <StatBlock
-                      label="Req/sec"
-                      value={
-                        loadResult.requestsPerSecond !== null
-                          ? loadResult.requestsPerSecond.toFixed(1)
-                          : "—"
-                      }
-                    />
-                  </div>
-                  {loadResult.thresholdsPassed !== null && (
-                    <div className="mt-3">
-                      {loadResult.thresholdsPassed ? (
-                        <OutlineChip icon={Check}>
-                          All thresholds passed
-                        </OutlineChip>
-                      ) : (
-                        <InvertChip icon={X}>
-                          One or more thresholds failed
-                        </InvertChip>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {(telemetry || isLivePolling) && (
+          <div className="flex w-full flex-col px-8 py-6">
+            {/* Overview tab */}
+            {tab === "overview" && (
+              <section className="grid grid-cols-1 gap-10 lg:grid-cols-[1fr_320px]">
                 <div>
                   <Eyebrow
                     action={
-                      isLivePolling ? (
-                        <span
-                          className="flex items-center gap-1.5 text-[11.5px] font-semibold"
-                          style={{ color: TEXT_PRIMARY }}
-                        >
-                          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-white" />
-                          Live
-                        </span>
-                      ) : undefined
+                      <button
+                        onClick={() => {
+                          setExplanationLoading(true);
+                          getExplanation(repositoryId, route.file, route.line)
+                            .then(setExplanation)
+                            .finally(() => setExplanationLoading(false));
+                        }}
+                        className="flex items-center gap-1.5 text-[11.5px] font-medium transition-colors"
+                        style={{ color: TEXT_TERTIARY }}
+                      >
+                        <RefreshCw
+                          size={12}
+                          className={explanationLoading ? "animate-spin" : ""}
+                        />
+                        Regenerate
+                      </button>
                     }
                   >
-                    Live telemetry
+                    What this endpoint does
                   </Eyebrow>
-
-                  {telemetry ? (
-                    <>
-                      <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
-                        <StatBlock
-                          label="Requests"
-                          value={telemetry.requestCount}
-                        />
-                        <StatBlock
-                          label="Error rate"
-                          value={`${telemetry.errorRatePercent}%`}
-                          alert={telemetry.errorRatePercent > 2}
-                        />
-                        <StatBlock
-                          label="p50"
-                          value={`${telemetry.latencyMs.p50} ms`}
-                        />
-                        <StatBlock
-                          label="p95"
-                          value={`${telemetry.latencyMs.p95} ms`}
-                        />
-                      </div>
-                      {chartData.length > 1 && (
-                        <div className="mt-4">
-                          <ResponsiveContainer width="100%" height={200}>
-                            <LineChart data={chartData}>
-                              <CartesianGrid stroke={BORDER} vertical={false} />
-                              <XAxis
-                                dataKey="time"
-                                stroke={TEXT_QUIET}
-                                fontSize={10}
-                              />
-                              <YAxis stroke={TEXT_QUIET} fontSize={10} />
-                              <Tooltip
-                                contentStyle={{
-                                  background: SURFACE,
-                                  border: `1px solid ${BORDER_STRONG}`,
-                                  borderRadius: 8,
-                                  fontSize: 11.5,
-                                }}
-                                labelStyle={{ color: TEXT_PRIMARY }}
-                              />
-                              <Line
-                                type="monotone"
-                                dataKey="p50"
-                                stroke={TEXT_TERTIARY}
-                                dot={false}
-                                strokeWidth={1.5}
-                              />
-                              <Line
-                                type="monotone"
-                                dataKey="p95"
-                                stroke="#ffffff"
-                                dot={false}
-                                strokeWidth={1.75}
-                              />
-                            </LineChart>
-                          </ResponsiveContainer>
-                        </div>
-                      )}
-                      {telemetry.requestCount === 0 && (
-                        <p
-                          className="mt-4 rounded-lg border px-3 py-2 text-[11.5px] font-medium"
-                          style={{
-                            borderColor: BORDER_STRONG,
-                            color: TEXT_SECONDARY,
-                          }}
-                        >
-                          No spans matched yet — still polling.
-                        </p>
-                      )}
-                    </>
+                  {explanationLoading ? (
+                    <div className="space-y-2.5">
+                      <div className="h-3.5 w-[92%] animate-pulse rounded bg-[#161616]" />
+                      <div className="h-3.5 w-[76%] animate-pulse rounded bg-[#161616]" />
+                      <div className="h-3.5 w-[54%] animate-pulse rounded bg-[#161616]" />
+                    </div>
                   ) : (
-                    <p className="text-[13px]" style={{ color: TEXT_QUIET }}>
-                      Run traffic to see live numbers here.
+                    <p
+                      className="text-[14px] leading-[1.75]"
+                      style={{ color: TEXT_SECONDARY }}
+                    >
+                      {explanation ?? "No explanation available yet."}
                     </p>
                   )}
                 </div>
-              )}
-              <PerformanceReportFull
-                method={route.method}
-                routePath={route.routePath}
-                loadResult={loadResult}
-                scriptRunning={scriptRunning}
-                scriptError={scriptError}
-                report={perfReport}
-                perfLoading={perfLoading}
-                perfError={perfError}
-                telemetry={telemetry}
-                baseline={baselineResult}
-                comparison={comparisonResult}
-                comparisonLoading={comparisonLoading}
-                onRunAgain={handleRunAgain}
-                onApplyFix={handleApplyFix}
-                applyFixLoading={applyFixLoading}
-                applyFixError={applyFixError}
-                fixApplied={fixApplied}
-              />
-            </section>
-          )}
-        </div>
-      </div>
 
-      {/* --------------------------------------------------------- */}
-      {/* Composer — sticky to the bottom of the viewport so it's    */}
-      {/* always visible without scrolling, regardless of content    */}
-      {/* height above it.                                            */}
-      {/* --------------------------------------------------------- */}
-      <div
-        className="sticky bottom-0 z-10 shrink-0 border-t"
-        style={{ borderColor: BORDER, background: BG }}
-      >
-        <div className={`mx-auto w-full ${CONTENT_WIDTH} px-8 py-3`}>
-          <div
-            className="flex w-full items-end gap-2 rounded-xl border px-3 py-2"
-            style={{ borderColor: BORDER_STRONG, background: SURFACE }}
-          >
-            <textarea
-              ref={textareaRef}
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Simulate 100 concurrent users checking out with random products for 30 seconds."
-              rows={1}
-              disabled={scriptLoading}
-              className="min-h-[22px] flex-1 resize-none bg-transparent py-1 text-[13px] leading-[1.5] outline-none"
-              style={{ color: TEXT_PRIMARY, fontFamily: SANS }}
-            />
-
-            {authRequired && (
-              <div
-                className="flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1.5"
-                style={{ borderColor: BORDER_STRONG }}
-              >
-                <KeyRound
-                  size={12}
-                  className="shrink-0"
-                  style={{ color: TEXT_TERTIARY }}
-                />
-                <input
-                  type="password"
-                  value={authToken}
-                  onChange={(e) => setAuthToken(e.target.value)}
-                  placeholder="Bearer token"
-                  className="w-[130px] bg-transparent text-[11.5px] outline-none"
-                  style={{ fontFamily: MONO, color: TEXT_PRIMARY }}
-                />
-              </div>
+                {connected && connected.files.length > 0 && (
+                  <div>
+                    <Eyebrow>Call chain</Eyebrow>
+                    <nav className="flex flex-col gap-2">
+                      {connected.files.map((f) => {
+                        const meta = ROLE_META[f.role];
+                        const Icon = meta.icon;
+                        return (
+                          <button
+                            key={f.path}
+                            onClick={() => {
+                              setActiveFile(f);
+                              setTab("source");
+                            }}
+                            className="flex items-center gap-2 rounded-lg border px-3 py-2 text-[12.5px] transition-colors"
+                            style={{ borderColor: BORDER, color: TEXT_TERTIARY }}
+                          >
+                            <Icon size={13} className="shrink-0" />
+                            <span className="shrink-0">{meta.label}</span>
+                            <span
+                              className="truncate text-[11.5px] opacity-70"
+                              style={{ fontFamily: MONO }}
+                            >
+                              {f.path.split("/").pop()}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </nav>
+                  </div>
+                )}
+              </section>
             )}
 
-            <button
-              onClick={handleGenerateScript}
-              disabled={scriptLoading || !description.trim()}
-              className="flex shrink-0 items-center justify-center gap-1.5 rounded-lg border px-3 py-1.5 text-[12px] font-semibold transition-colors disabled:opacity-30"
-              style={{ borderColor: BORDER_STRONG, color: TEXT_SECONDARY }}
+            {/* Source & Schema tab */}
+            {tab === "source" && (
+              <section className="grid grid-cols-1 gap-8 lg:grid-cols-[1fr_280px]">
+                <div>
+                  {connected && connected.files.length > 0 && (
+                    <nav className="mb-4 flex flex-wrap items-center gap-2">
+                      {connected.files.map((f) => {
+                        const meta = ROLE_META[f.role];
+                        const Icon = meta.icon;
+                        const isActive = activeFile?.path === f.path;
+                        return (
+                          <button
+                            key={f.path}
+                            onClick={() => setActiveFile(f)}
+                            className={
+                              isActive
+                                ? "flex items-center gap-2 rounded-lg bg-white px-3 py-1.5 text-[12.5px] font-semibold text-black"
+                                : "flex items-center gap-2 rounded-lg border px-3 py-1.5 text-[12.5px] transition-colors"
+                            }
+                            style={
+                              isActive
+                                ? undefined
+                                : { borderColor: BORDER, color: TEXT_TERTIARY }
+                            }
+                          >
+                            <Icon size={13} />
+                            {meta.label}
+                            <span
+                              className="max-w-[150px] truncate text-[11.5px] opacity-70"
+                              style={{ fontFamily: MONO }}
+                            >
+                              {f.path.split("/").pop()}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </nav>
+                  )}
+
+                  <div
+                    className="overflow-hidden rounded-xl border"
+                    style={{ borderColor: BORDER, background: "#0d0d0d" }}
+                  >
+                    <div
+                      className="flex items-center justify-between border-b px-5 py-3"
+                      style={{ borderColor: BORDER }}
+                    >
+                      <div
+                        className="flex items-center gap-2.5 text-[13px]"
+                        style={{ color: TEXT_SECONDARY }}
+                      >
+                        {activeFile && (
+                          <>
+                            {(() => {
+                              const Icon = ROLE_META[activeFile.role].icon;
+                              return (
+                                <Icon
+                                  size={14}
+                                  style={{ color: TEXT_TERTIARY }}
+                                />
+                              );
+                            })()}
+                            <span style={{ fontFamily: MONO }}>
+                              {activeFile.path}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                    <div className="max-h-[55vh] overflow-auto px-3">
+                      {activeFile ? (
+                        <CodeBlock
+                          code={activeFile.content}
+                          filePath={activeFile.path}
+                          startLine={activeFile.startLine}
+                          highlightLine={activeFile.highlightLine}
+                        />
+                      ) : (
+                        <p
+                          className="px-4 py-8 text-[13px]"
+                          style={{ color: TEXT_QUIET }}
+                        >
+                          {connected === null
+                            ? "Loading source…"
+                            : "No source available for this file."}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <Eyebrow>Request body</Eyebrow>
+                  {connected?.requestBodyFields.length ? (
+                    <div
+                      className="overflow-hidden rounded-lg border"
+                      style={{ borderColor: BORDER }}
+                    >
+                      {connected.requestBodyFields.map((f, i) => (
+                        <div
+                          key={f}
+                          className="flex items-center justify-between px-3.5 py-2.5 text-[12.5px]"
+                          style={{
+                            borderTop: i > 0 ? `1px solid ${BORDER}` : undefined,
+                          }}
+                        >
+                          <span style={{ fontFamily: MONO, color: TEXT_PRIMARY }}>
+                            {f}
+                          </span>
+                          <span
+                            className="rounded border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.06em]"
+                            style={{
+                              borderColor: BORDER_STRONG,
+                              color: TEXT_TERTIARY,
+                            }}
+                          >
+                            field
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p
+                      className="text-[12.5px] leading-[1.7]"
+                      style={{ color: TEXT_QUIET }}
+                    >
+                      No{" "}
+                      <code style={{ fontFamily: MONO, color: TEXT_SECONDARY }}>
+                        req.body
+                      </code>{" "}
+                      usage found — this handler likely doesn't read a request
+                      body (e.g. a GET/list route).
+                    </p>
+                  )}
+                </div>
+              </section>
+            )}
+
+            {/* Script tab — the generated k6 code. Full width, fills the */}
+            {/* available height instead of being capped/split in half.   */}
+            {tab === "script" && (
+              <section className="flex flex-1 flex-col">
+                {!script && !scriptError && (
+                  <p className="text-[13px]" style={{ color: TEXT_QUIET }}>
+                    Nothing here yet — describe a scenario below and hit Generate.
+                  </p>
+                )}
+
+                {scriptError && !script && (
+                  <div className="mb-6">
+                    <InvertChip icon={X}>{scriptError}</InvertChip>
+                  </div>
+                )}
+
+                {script && (
+                  <div
+                    className="flex min-h-[60vh] flex-1 flex-col overflow-hidden rounded-xl border text-left"
+                    style={{ borderColor: BORDER, background: "#0d0d0d" }}
+                  >
+                    <div
+                      className="flex shrink-0 items-center justify-between border-b px-3.5 py-2.5"
+                      style={{ borderColor: BORDER }}
+                    >
+                      <span
+                        className="text-[11px] font-semibold uppercase tracking-[0.06em]"
+                        style={{ color: TEXT_TERTIARY }}
+                      >
+                        Generated test · k6
+                      </span>
+                      <button
+                        onClick={() => setScriptEditing((e) => !e)}
+                        className="rounded-md px-1.5 py-0.5 text-[11.5px] font-medium transition-colors"
+                        style={{ color: TEXT_SECONDARY }}
+                      >
+                        {scriptEditing ? "Done" : "Edit"}
+                      </button>
+                    </div>
+                    {scriptEditing ? (
+                      <textarea
+                        value={script}
+                        onChange={(e) => setScript(e.target.value)}
+                        spellCheck={false}
+                        className="w-full flex-1 resize-none bg-transparent px-3.5 py-3 text-[12.5px] leading-[1.7] outline-none"
+                        style={{ fontFamily: MONO, color: TEXT_SECONDARY }}
+                      />
+                    ) : (
+                      <div className="flex-1 overflow-auto px-2.5">
+                        <CodeBlock code={script} filePath="script.js" />
+                      </div>
+                    )}
+                  </div>
+                )}
+              </section>
+            )}
+
+            {/* Report tab — run stats + live telemetry. Only mounted when */}
+            {/* there's actually a report to show (see reportAvailable).   */}
+            {tab === "report" && reportAvailable && (
+              <section>
+                {scriptError && (
+                  <div className="mb-6">
+                    <InvertChip icon={X}>{scriptError}</InvertChip>
+                  </div>
+                )}
+
+                {progress && progress.status !== "done" && (
+                  <p
+                    className="mb-3 text-[11.5px]"
+                    style={{ color: TEXT_TERTIARY }}
+                  >
+                    {progress.status === "starting"
+                      ? "Starting k6…"
+                      : `${progress.sent} requests sent so far…`}
+                  </p>
+                )}
+
+                {loadResult && (
+                  <div className="mb-8">
+                    <Eyebrow>Run results</Eyebrow>
+                    <div className="grid grid-cols-3 gap-2.5">
+                      <StatBlock label="Total" value={loadResult.requestsSent} />
+                      <StatBlock
+                        label="Errors"
+                        value={`${(loadResult.errorRate * 100).toFixed(1)}%`}
+                        alert={loadResult.errorRate > 0.01}
+                      />
+                      <StatBlock
+                        label="Avg"
+                        value={`${Math.round(loadResult.avgDurationMs)}ms`}
+                      />
+                      <StatBlock
+                        label="p95"
+                        value={
+                          loadResult.p95DurationMs !== null
+                            ? `${Math.round(loadResult.p95DurationMs)}ms`
+                            : "—"
+                        }
+                      />
+                      <StatBlock
+                        label="p99"
+                        value={
+                          loadResult.p99DurationMs !== null
+                            ? `${Math.round(loadResult.p99DurationMs)}ms`
+                            : "—"
+                        }
+                      />
+                      <StatBlock
+                        label="Req/sec"
+                        value={
+                          loadResult.requestsPerSecond !== null
+                            ? loadResult.requestsPerSecond.toFixed(1)
+                            : "—"
+                        }
+                      />
+                    </div>
+                    {loadResult.thresholdsPassed !== null && (
+                      <div className="mt-3">
+                        {loadResult.thresholdsPassed ? (
+                          <OutlineChip icon={Check}>
+                            All thresholds passed
+                          </OutlineChip>
+                        ) : (
+                          <InvertChip icon={X}>
+                            One or more thresholds failed
+                          </InvertChip>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {(telemetry || isLivePolling) && (
+                  <div>
+                    <Eyebrow
+                      action={
+                        isLivePolling ? (
+                          <span
+                            className="flex items-center gap-1.5 text-[11.5px] font-semibold"
+                            style={{ color: TEXT_PRIMARY }}
+                          >
+                            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-white" />
+                            Live
+                          </span>
+                        ) : undefined
+                      }
+                    >
+                      Live telemetry
+                    </Eyebrow>
+
+                    {telemetry ? (
+                      <>
+                        <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
+                          <StatBlock
+                            label="Requests"
+                            value={telemetry.requestCount}
+                          />
+                          <StatBlock
+                            label="Error rate"
+                            value={`${telemetry.errorRatePercent}%`}
+                            alert={telemetry.errorRatePercent > 2}
+                          />
+                          <StatBlock
+                            label="p50"
+                            value={`${telemetry.latencyMs.p50} ms`}
+                          />
+                          <StatBlock
+                            label="p95"
+                            value={`${telemetry.latencyMs.p95} ms`}
+                          />
+                        </div>
+                        {chartData.length > 1 && (
+                          <div className="mt-4">
+                            <ResponsiveContainer width="100%" height={200}>
+                              <LineChart data={chartData}>
+                                <CartesianGrid stroke={BORDER} vertical={false} />
+                                <XAxis
+                                  dataKey="time"
+                                  stroke={TEXT_QUIET}
+                                  fontSize={10}
+                                />
+                                <YAxis stroke={TEXT_QUIET} fontSize={10} />
+                                <Tooltip
+                                  contentStyle={{
+                                    background: SURFACE,
+                                    border: `1px solid ${BORDER_STRONG}`,
+                                    borderRadius: 8,
+                                    fontSize: 11.5,
+                                  }}
+                                  labelStyle={{ color: TEXT_PRIMARY }}
+                                />
+                                <Line
+                                  type="monotone"
+                                  dataKey="p50"
+                                  stroke={TEXT_TERTIARY}
+                                  dot={false}
+                                  strokeWidth={1.5}
+                                />
+                                <Line
+                                  type="monotone"
+                                  dataKey="p95"
+                                  stroke="#ffffff"
+                                  dot={false}
+                                  strokeWidth={1.75}
+                                />
+                              </LineChart>
+                            </ResponsiveContainer>
+                          </div>
+                        )}
+                        {telemetry.requestCount === 0 && (
+                          <p
+                            className="mt-4 rounded-lg border px-3 py-2 text-[11.5px] font-medium"
+                            style={{
+                              borderColor: BORDER_STRONG,
+                              color: TEXT_SECONDARY,
+                            }}
+                          >
+                            No spans matched yet — still polling.
+                          </p>
+                        )}
+                      </>
+                    ) : (
+                      <p className="text-[13px]" style={{ color: TEXT_QUIET }}>
+                        Run traffic to see live numbers here.
+                      </p>
+                    )}
+                  </div>
+                )}
+                <PerformanceReportFull
+                  method={route.method}
+                  routePath={route.routePath}
+                  loadResult={loadResult}
+                  scriptRunning={scriptRunning}
+                  scriptError={scriptError}
+                  report={perfReport}
+                  perfLoading={perfLoading}
+                  perfError={perfError}
+                  telemetry={telemetry}
+                  baseline={baselineResult}
+                  comparison={comparisonResult}
+                  comparisonLoading={comparisonLoading}
+                  onRunAgain={handleRunAgain}
+                  onApplyFix={handleApplyFix}
+                  applyFixLoading={applyFixLoading}
+                  applyFixError={applyFixError}
+                  fixApplied={fixApplied}
+                />
+              </section>
+            )}
+          </div>
+        </div>
+
+        {/* --------------------------------------------------------- */}
+        {/* Composer — sticky to the bottom of the viewport so it's    */}
+        {/* always visible without scrolling, regardless of content    */}
+        {/* height above it.                                            */}
+        {/* --------------------------------------------------------- */}
+        <div
+          className="sticky bottom-0 z-10 shrink-0 border-t"
+          style={{ borderColor: BORDER, background: BG }}
+        >
+          <div className="w-full px-8 py-3">
+            <div
+              className="flex w-full items-end gap-2 rounded-xl border px-3 py-2"
+              style={{ borderColor: BORDER_STRONG, background: SURFACE }}
             >
-              {scriptLoading ? (
-                <>
-                  <Loader2 size={12} className="animate-spin" />
-                  Generating
-                </>
-              ) : (
-                <>
-                  <Sparkles size={12} />
-                  Generate
-                </>
+              <textarea
+                ref={textareaRef}
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="Simulate 100 concurrent users checking out with random products for 30 seconds."
+                rows={1}
+                disabled={scriptLoading}
+                className="min-h-[22px] flex-1 resize-none bg-transparent py-1 text-[13px] leading-[1.5] outline-none"
+                style={{ color: TEXT_PRIMARY, fontFamily: SANS }}
+              />
+
+              {authRequired && (
+                <div
+                  className="flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1.5"
+                  style={{ borderColor: BORDER_STRONG }}
+                >
+                  <KeyRound
+                    size={12}
+                    className="shrink-0"
+                    style={{ color: TEXT_TERTIARY }}
+                  />
+                  <input
+                    type="password"
+                    value={authToken}
+                    onChange={(e) => setAuthToken(e.target.value)}
+                    placeholder="Bearer token"
+                    className="w-[130px] bg-transparent text-[11.5px] outline-none"
+                    style={{ fontFamily: MONO, color: TEXT_PRIMARY }}
+                  />
+                </div>
               )}
-            </button>
-            <button
-              onClick={handleRunScript}
-              disabled={scriptRunning || !script}
-              className="flex shrink-0 items-center justify-center gap-1.5 rounded-lg bg-white px-3 py-1.5 text-[12px] font-bold text-black transition-colors hover:bg-[#e5e5e5] disabled:opacity-30"
-            >
-              {scriptRunning ? (
-                <>
-                  <Loader2 size={12} className="animate-spin" />
-                  Running
-                </>
-              ) : (
-                <>
-                  <Play size={12} />
-                  Run
-                </>
-              )}
-            </button>
+
+              <button
+                onClick={handleGenerateScript}
+                disabled={scriptLoading || !description.trim()}
+                className="flex shrink-0 items-center justify-center gap-1.5 rounded-lg border px-3 py-1.5 text-[12px] font-semibold transition-colors disabled:opacity-30"
+                style={{ borderColor: BORDER_STRONG, color: TEXT_SECONDARY }}
+              >
+                {scriptLoading ? (
+                  <>
+                    <Loader2 size={12} className="animate-spin" />
+                    Generating
+                  </>
+                ) : (
+                  <>
+                    <Sparkles size={12} />
+                    Generate
+                  </>
+                )}
+              </button>
+              <button
+                onClick={handleRunScript}
+                disabled={scriptRunning || !script}
+                className="flex shrink-0 items-center justify-center gap-1.5 rounded-lg bg-white px-3 py-1.5 text-[12px] font-bold text-black transition-colors hover:bg-[#e5e5e5] disabled:opacity-30"
+              >
+                {scriptRunning ? (
+                  <>
+                    <Loader2 size={12} className="animate-spin" />
+                    Running
+                  </>
+                ) : (
+                  <>
+                    <Play size={12} />
+                    Run
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       </div>
 
-      {consoleOpen && (
-        <ExecutionConsole
-          entries={entries}
-          progress={progress}
-          expanded={consoleExpanded}
-          onToggleExpand={() => setConsoleExpanded((v) => !v)}
-          onClear={reset}
-          onClose={() => setConsoleOpen(false)}
-        />
-      )}
+      {/* ======================================================= */}
+      {/* Console panel — a real flex sibling of the main column,   */}
+      {/* not an overlay pushed off with margin. Only takes the     */}
+      {/* width it's given, and only exists in the DOM when open.   */}
+      {/* ======================================================= */}
+      {/* {consoleOpen && (
+        <div
+          className="flex shrink-0 flex-col overflow-hidden border-l"
+          style={{
+            width: consoleWidth,
+            borderColor: BORDER,
+            transition: "width 160ms ease",
+          }}
+        >
+          <ExecutionConsole
+            entries={entries}
+            progress={progress}
+            expanded={consoleExpanded}
+            onToggleExpand={() => setConsoleExpanded((v) => !v)}
+            onClear={reset}
+            onClose={() => setConsoleOpen(false)}
+          />
+        </div>
+      )} */}
     </div>
   );
 }
