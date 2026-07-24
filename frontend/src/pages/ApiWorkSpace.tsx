@@ -31,6 +31,8 @@ import {
   ChevronUp,
   Info,
   Workflow,
+  Cpu,
+  MemoryStick,
 } from "lucide-react";
 import type { AppDispatch, RootState } from "../store/store";
 import { fetchRepoDetail } from "../store/slices/reposSlice";
@@ -81,6 +83,7 @@ import {
   CONSOLE_HEIGHT_NARROW,
   CONSOLE_HEIGHT_WIDE,
 } from "../theme";
+import { useServiceMetrics } from "../hooks/useServiceMetrics";
 
 const TELEMETRY_POLL_MS = 2000;
 const TELEMETRY_POLL_DURATION_MS = 20_000;
@@ -379,7 +382,13 @@ export default function ApiWorkspace() {
   const route = repo?.routes[Number(routeIndex)];
 
   const { entries, progress, reset } = useTrafficStream(repositoryId || null);
+  const {
+    history: metricsHistory,
+    latest: latestMetrics,
+    connected: metricsConnected,
+  } = useServiceMetrics(repositoryId || null);
 
+  
   // --- endpoint context ---
   const [explanation, setExplanation] = useState<string | null>(null);
   const [explanationLoading, setExplanationLoading] = useState(false);
@@ -959,7 +968,153 @@ export default function ApiWorkspace() {
                   </div>
                 </div>
               </Panel>
-
+              <Panel>
+                <PanelHeader
+                  icon={Cpu}
+                  title="Container health"
+                  action={
+                    metricsConnected ? (
+                      <span
+                        className="flex items-center gap-1.5 text-[11px] font-semibold"
+                        style={{ color: ACCENT_TEXT }}
+                      >
+                        <span
+                          className="h-1.5 w-1.5 animate-pulse rounded-full"
+                          style={{ background: ACCENT }}
+                        />
+                        Live
+                      </span>
+                    ) : undefined
+                  }
+                />
+                <div className="px-5 py-4">
+                  {!metricsConnected || !latestMetrics ? (
+                    <p className="text-[13px]" style={{ color: TEXT_TERTIARY }}>
+                      No active container for this repo yet — start a run to see
+                      live CPU, memory, and request-rate metrics here.
+                    </p>
+                  ) : (
+                    <>
+                      <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
+                        <StatBlock
+                          label="CPU"
+                          value={`${latestMetrics.cpuPercent.toFixed(1)}%`}
+                          alert={latestMetrics.cpuPercent > 90}
+                        />
+                        <StatBlock
+                          label="Memory"
+                          value={`${latestMetrics.memoryMB.toFixed(0)} MB`}
+                        />
+                        <StatBlock
+                          label="Req/sec"
+                          value={latestMetrics.requestRate.toFixed(1)}
+                        />
+                        <StatBlock
+                          label="Error rate"
+                          value={`${(latestMetrics.errorRate * 100).toFixed(1)}%`}
+                          alert={latestMetrics.errorRate > 0.05}
+                        />
+                      </div>
+                      {metricsHistory.length > 1 && (
+                        <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+                          <div>
+                            <div
+                              className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.06em]"
+                              style={{ color: TEXT_TERTIARY }}
+                            >
+                              <Cpu size={11} /> CPU %
+                            </div>
+                            <ResponsiveContainer width="100%" height={140}>
+                              <LineChart data={metricsHistory}>
+                                <CartesianGrid
+                                  stroke={BORDER}
+                                  vertical={false}
+                                />
+                                <XAxis
+                                  dataKey="timestamp"
+                                  tickFormatter={(t) =>
+                                    new Date(t).toLocaleTimeString([], {
+                                      minute: "2-digit",
+                                      second: "2-digit",
+                                    })
+                                  }
+                                  stroke={TEXT_QUIET}
+                                  fontSize={10}
+                                />
+                                <YAxis stroke={TEXT_QUIET} fontSize={10} />
+                                <Tooltip
+                                  contentStyle={{
+                                    background: "#fff",
+                                    border: `1px solid ${BORDER_STRONG}`,
+                                    borderRadius: 8,
+                                    fontSize: 11.5,
+                                  }}
+                                  labelFormatter={(t) =>
+                                    new Date(t as number).toLocaleTimeString()
+                                  }
+                                />
+                                <Line
+                                  type="monotone"
+                                  dataKey="cpuPercent"
+                                  stroke={ACCENT_HOVER}
+                                  dot={false}
+                                  strokeWidth={2}
+                                />
+                              </LineChart>
+                            </ResponsiveContainer>
+                          </div>
+                          <div>
+                            <div
+                              className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.06em]"
+                              style={{ color: TEXT_TERTIARY }}
+                            >
+                              <MemoryStick size={11} /> Memory (MB)
+                            </div>
+                            <ResponsiveContainer width="100%" height={140}>
+                              <LineChart data={metricsHistory}>
+                                <CartesianGrid
+                                  stroke={BORDER}
+                                  vertical={false}
+                                />
+                                <XAxis
+                                  dataKey="timestamp"
+                                  tickFormatter={(t) =>
+                                    new Date(t).toLocaleTimeString([], {
+                                      minute: "2-digit",
+                                      second: "2-digit",
+                                    })
+                                  }
+                                  stroke={TEXT_QUIET}
+                                  fontSize={10}
+                                />
+                                <YAxis stroke={TEXT_QUIET} fontSize={10} />
+                                <Tooltip
+                                  contentStyle={{
+                                    background: "#fff",
+                                    border: `1px solid ${BORDER_STRONG}`,
+                                    borderRadius: 8,
+                                    fontSize: 11.5,
+                                  }}
+                                  labelFormatter={(t) =>
+                                    new Date(t as number).toLocaleTimeString()
+                                  }
+                                />
+                                <Line
+                                  type="monotone"
+                                  dataKey="memoryMB"
+                                  stroke={TEXT_TERTIARY}
+                                  dot={false}
+                                  strokeWidth={2}
+                                />
+                              </LineChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              </Panel>
               {!script && !scriptError ? (
                 <div
                   className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed py-24 text-center"

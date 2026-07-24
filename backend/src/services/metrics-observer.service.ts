@@ -1,14 +1,12 @@
-
 import mongoose from "mongoose";
+import { spawn } from "node:child_process";
 import { getIO } from "../config/socket.js";
 import { RunModel } from "../models/run.model.js";
 import {
   runScalarTraceQuerySafe,
-  runScalarMetricQuerySafe,
   extractScalarValues,
   SERVICE_ATTRIBUTE,
   DURATION_ATTRIBUTE,
-  CONTAINER_NAME_ATTRIBUTE,
   nanoToMs,
 } from "./signoz.service.js";
 
@@ -55,86 +53,112 @@ interface RepoLoopState {
 
 const loops = new Map<string, RepoLoopState>();
 
-// --- SigNoz container resource metrics (replaces `docker stats`) -------
+// --- Container resource metrics via `docker stats` ----------------------
 //
-// Needs the OTel Collector's `docker_stats` receiver running against the
-// Docker socket and exporting to SigNoz. `container.cpu.utilization` is a
-// 0..1 gauge (Docker's %CPU / 100). `container.memory.usage.total` is
-// bytes and excludes cache, matching what `docker stats` shows as
-// MemUsage. Both are keyed by the `container.name` resource attribute.
-//
-// NOTE: if this comes back empty/zero, check how `container.name` is
-// actually populated for your containers in SigNoz's explorer — Docker's
-// own API returns names with a leading "/", and depending on collector
-// version that may or may not be stripped before ingestion.
-const CONTAINER_METRIC_WINDOW_MS = 30_000; // must exceed the collector's scrape interval
+// Queries Docker directly for the one container we actually started —
+// no OTel collector, no receiver config, no attribute-name guessing.
+// `docker stats <name> --no-stream` returns one JSON line for that
+// container's current CPU/memory, which is exactly what we need since we
+// already know containerName from activeRuns.
+
+const DOCKER_STATS_TIMEOUT_MS = 5_000;
+
+interface DockerStatsLine {
+  CPUPerc?: string; // e.g. "12.34%"
+  MemUsage?: string; // e.g. "123.4MiB / 512MiB"
+}
+
+// Converts docker stats' human-readable units ("123.4MiB", "1.2GiB",
+// "512KiB") to MB. Falls back to 0 for anything unrecognized rather than
+// throwing — a parse miss here shouldn't take down the whole metrics tick.
+function parseMemToMB(raw: string): number {
+  const match = raw.trim().match(/^([\d.]+)\s*([KMGT]?i?B)$/i);
+  if (!match) return 0;
+  const value = parseFloat(match[1]);
+  const unit = match[2].toUpperCase();
+  const multiplierToMB: Record<string, number> = {
+    B: 1 / (1024 * 1024),
+    KB: 1 / 1024,
+    KIB: 1 / 1024,
+    MB: 1,
+    MIB: 1,
+    GB: 1024,
+    GIB: 1024,
+    TB: 1024 * 1024,
+    TIB: 1024 * 1024,
+  };
+  return Math.round(value * (multiplierToMB[unit] ?? 1) * 100) / 100;
+}
 
 async function getContainerResourceMetrics(
   containerName: string,
 ): Promise<{ cpuPercent: number; memoryMB: number } | null> {
-  const end = Date.now();
-  const start = end - CONTAINER_METRIC_WINDOW_MS;
-  const warnings: string[] = [];
-  const escapedName = containerName.replace(/'/g, "\\'");
+  return new Promise((resolve) => {
+    const child = spawn("docker", [
+      "stats",
+      containerName,
+      "--no-stream",
+      "--format",
+      "{{json .}}",
+    ]);
 
+    let stdout = "";
+    let settled = false;
 
-  const bareName = containerName.replace(/^\/+/, "");
-  const escapedBare = bareName.replace(/'/g, "\\'");
-  const escapedSlashed = `/${bareName}`.replace(/'/g, "\\'");
-  const filter = `(${CONTAINER_NAME_ATTRIBUTE} = '${escapedBare}' OR ${CONTAINER_NAME_ATTRIBUTE} = '${escapedSlashed}')`;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      resolve(null);
+    }, DOCKER_STATS_TIMEOUT_MS);
 
-  const [cpuRaw, memRaw] = await Promise.all([
-    runScalarMetricQuerySafe(
-      start,
-      end,
-      filter,
-      {
-        metricName: "container.cpu.utilization",
-        timeAggregation: "avg",
-        spaceAggregation: "avg",
-        reduceTo: "last",
-      },
-      "container CPU utilization",
-      warnings,
-    ),
-    runScalarMetricQuerySafe(
-      start,
-      end,
-      filter,
-      {
-        metricName: "container.memory.usage.total",
-        timeAggregation: "avg",
-        spaceAggregation: "avg",
-        reduceTo: "last",
-      },
-      "container memory usage",
-      warnings,
-    ),
-  ]);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
 
-  if (warnings.length > 0) {
-    console.warn(
-      `[MetricsObserver] getContainerResourceMetrics(${containerName}) warnings:`,
-      warnings,
-    );
-  }
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      console.error(
+        `[MetricsObserver] docker stats spawn error for ${containerName}:`,
+        err.message,
+      );
+      resolve(null);
+    });
 
-  const cpuValues = extractScalarValues(cpuRaw, [{ alias: "value" }]);
-  const memValues = extractScalarValues(memRaw, [{ alias: "value" }]);
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
 
-  const cpuFraction = cpuValues.value; // 0..1
-  const memBytes = memValues.value;
+      // Non-zero exit or empty output almost always means the container
+      // already stopped between this tick and the last one — treat as
+      // "no data right now" rather than logging noise every 5s.
+      if (code !== 0 || !stdout.trim()) {
+        resolve(null);
+        return;
+      }
 
-  if (cpuFraction === null && memBytes === null) return null;
-
-  return {
-    cpuPercent:
-      cpuFraction !== null ? Math.round(cpuFraction * 10000) / 100 : 0,
-    memoryMB:
-      memBytes !== null ? Math.round((memBytes / 1024 / 1024) * 100) / 100 : 0,
-  };
+      try {
+        const stat: DockerStatsLine = JSON.parse(stdout.trim().split("\n")[0]);
+        const cpuPercent =
+          parseFloat(String(stat.CPUPerc ?? "0").replace("%", "")) || 0;
+        const memUsedRaw =
+          String(stat.MemUsage ?? "0MiB").split("/")[0]?.trim() ?? "0MiB";
+        resolve({ cpuPercent, memoryMB: parseMemToMB(memUsedRaw) });
+      } catch (err) {
+        console.error(
+          `[MetricsObserver] Failed to parse docker stats output for ${containerName}:`,
+          err,
+          "raw:",
+          stdout.slice(0, 300),
+        );
+        resolve(null);
+      }
+    });
+  });
 }
-
 // --- SigNoz aggregate (whole service, no route filter) ----------------
 
 async function getServiceAggregate(
