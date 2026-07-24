@@ -1,7 +1,25 @@
+// src/components/ObservabilityLauncher.tsx
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { io, type Socket } from "socket.io-client";
 import { startRun, getRun } from "../api/repos";
+import {
+  SANS,
+  MONO,
+  BG,
+  SURFACE,
+  SURFACE_RAISED,
+  BORDER,
+  BORDER_STRONG,
+  TEXT_PRIMARY,
+  TEXT_SECONDARY,
+  TEXT_TERTIARY,
+  TEXT_QUIET,
+  ACCENT,
+  ACCENT_HOVER,
+  ERROR,
+  ERROR_SOFT,
+} from "../theme";
 
 interface ObservabilityLauncherProps {
   repositoryId: string;
@@ -16,21 +34,6 @@ type Phase =
   | "verifying"
   | "done"
   | "error";
-
-// ---------------------------------------------------------------------------
-// Design tokens — same palette as ApiWorkspace, monochrome only.
-// ---------------------------------------------------------------------------
-const SANS = "'Inter', ui-sans-serif, system-ui, sans-serif";
-const MONO = "'Berkeley Mono', ui-monospace, monospace";
-
-const BG = "#0a0a0a";
-const SURFACE = "#111111";
-const BORDER = "#1e1e1e";
-const BORDER_STRONG = "#2e2e2e";
-const TEXT_PRIMARY = "#f5f5f5";
-const TEXT_SECONDARY = "#b3b3b3";
-const TEXT_TERTIARY = "#6e6e6e";
-const TEXT_QUIET = "#4a4a4a";
 
 const STEPS: { phase: Phase; label: string }[] = [
   { phase: "installing", label: "Installing dependencies" },
@@ -212,7 +215,7 @@ export default function ObservabilityLauncher({
         }
         @keyframes obsPulse {
           0%, 100% { opacity: 1; }
-          50% { opacity: 0.45; }
+          50% { opacity: 0.4; }
         }
         @keyframes obsHintFadeIn {
           from { opacity: 0; }
@@ -222,40 +225,48 @@ export default function ObservabilityLauncher({
 
       {phase === "idle" && (
         <div
-          className="rounded-2xl border p-6 transition-colors"
+          className="rounded-xl border p-5"
           style={{ borderColor: BORDER, background: SURFACE, fontFamily: SANS }}
         >
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <h3
-                className="text-[14px] font-semibold"
-                style={{ color: TEXT_PRIMARY }}
-              >
-                Start Observability
-              </h3>
-              <p
-                className="mt-1 text-[12.5px]"
-                style={{ color: TEXT_TERTIARY }}
-              >
-                {envReady
-                  ? "Boots the service with tracing already attached — then opens the dashboard automatically."
-                  : "Add the environment variables above to continue."}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={handleLaunch}
-              disabled={!envReady}
-              className="shrink-0 rounded-lg bg-white px-4 py-2 text-[13px] font-semibold text-black transition-opacity hover:bg-[#e5e5e5] disabled:cursor-not-allowed disabled:opacity-25"
-            >
-              Start Observability →
-            </button>
-          </div>
+          <h3
+            className="text-[13px] font-semibold"
+            style={{ color: TEXT_PRIMARY }}
+          >
+            Start observability
+          </h3>
+          <p className="mt-1.5 text-[12.5px]" style={{ color: TEXT_TERTIARY }}>
+            {envReady
+              ? "Boots the service with tracing already attached, then opens the dashboard automatically."
+              : "Add the environment variables above to continue."}
+          </p>
+          <button
+            type="button"
+            onClick={handleLaunch}
+            disabled={!envReady}
+            className="mt-4 w-full rounded-lg px-4 py-2.5 text-[13px] font-semibold transition-colors disabled:cursor-not-allowed"
+            style={
+              envReady
+                ? { background: ACCENT, color: TEXT_PRIMARY }
+                : {
+                    background: SURFACE_RAISED,
+                    color: TEXT_QUIET,
+                    border: `1px solid ${BORDER}`,
+                  }
+            }
+            onMouseEnter={(e) => {
+              if (envReady) e.currentTarget.style.background = ACCENT_HOVER;
+            }}
+            onMouseLeave={(e) => {
+              if (envReady) e.currentTarget.style.background = ACCENT;
+            }}
+          >
+            Start observability →
+          </button>
         </div>
       )}
 
-      {/* Full-page takeover while the run is in flight — just the phase as
-          a large changing headline, an elapsed timer, and a slim progress
+      {/* Full-page takeover while the run is in flight — the phase as a
+          large changing headline, an elapsed timer, and a slim progress
           indicator. Nothing else on screen. */}
       {isOverlayPhase && (
         <div
@@ -287,7 +298,7 @@ export default function ObservabilityLauncher({
                   className="h-1.5 rounded-full transition-all duration-300"
                   style={{
                     width: current ? 28 : 8,
-                    background: done || current ? TEXT_PRIMARY : BORDER_STRONG,
+                    background: done || current ? ACCENT : BORDER_STRONG,
                     animation: current
                       ? "obsPulse 1.6s ease-in-out infinite"
                       : undefined,
@@ -324,9 +335,11 @@ export default function ObservabilityLauncher({
           style={{ background: BG, fontFamily: SANS }}
         >
           <span
-            className="h-2 w-2 rounded-full"
-            style={{ background: TEXT_PRIMARY }}
-          />
+            className="flex h-8 w-8 items-center justify-center rounded-full text-[14px]"
+            style={{ background: ERROR_SOFT, color: ERROR }}
+          >
+            !
+          </span>
           <h1
             className="text-center text-[28px] font-semibold tracking-tight sm:text-[38px]"
             style={{ color: TEXT_PRIMARY }}
@@ -342,8 +355,12 @@ export default function ObservabilityLauncher({
           <button
             type="button"
             onClick={handleRetry}
-            className="mt-2 rounded-lg border px-5 py-2.5 text-[13px] font-semibold transition-colors hover:border-[#454545]"
+            className="mt-2 rounded-lg border px-5 py-2.5 text-[13px] font-semibold transition-colors"
             style={{ borderColor: BORDER_STRONG, color: TEXT_PRIMARY }}
+            onMouseEnter={(e) => (e.currentTarget.style.borderColor = ERROR)}
+            onMouseLeave={(e) =>
+              (e.currentTarget.style.borderColor = BORDER_STRONG)
+            }
           >
             Retry
           </button>
