@@ -24,10 +24,6 @@ export default function App() {
           <Route index element={<RepositoriesPage />} />
           <Route path="repos/:repositoryId" element={<RepoDetail />} />
           <Route
-            path="repos/:repositoryId/observability"
-            element={<ObservabilityDashboard />}
-          />
-          <Route
             path="repos/:repositoryId/endpoints"
             element={<EndpointsPage />}
           />

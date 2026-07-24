@@ -134,7 +134,7 @@ export default function ObservabilityLauncher({
         onLaunched();
         cleanupSocket();
         stopPolling();
-        navigate(`/workspace/repos/${repositoryId}/observability`);
+        navigate(`/workspace/repos/${repositoryId}/endpoints`);
       }, 900);
       return;
     }
@@ -232,11 +232,11 @@ export default function ObservabilityLauncher({
             className="text-[13px] font-semibold"
             style={{ color: TEXT_PRIMARY }}
           >
-            Start observability
+            Start monitoring
           </h3>
           <p className="mt-1.5 text-[12.5px]" style={{ color: TEXT_TERTIARY }}>
             {envReady
-              ? "Boots the service with tracing already attached, then opens the dashboard automatically."
+              ? "Boots the service with tracing already attached, then opens the endpoint map automatically."
               : "Add the environment variables above to continue."}
           </p>
           <button
@@ -260,7 +260,7 @@ export default function ObservabilityLauncher({
               if (envReady) e.currentTarget.style.background = ACCENT;
             }}
           >
-            Start observability →
+            Start monitoring →
           </button>
         </div>
       )}
@@ -277,7 +277,7 @@ export default function ObservabilityLauncher({
             className="text-[11px] font-semibold uppercase tracking-[0.24em]"
             style={{ color: TEXT_TERTIARY, fontFamily: MONO }}
           >
-            Observability · {elapsed}s
+            Booting · {elapsed}s
           </span>
 
           <h1
@@ -323,7 +323,7 @@ export default function ObservabilityLauncher({
 
           {phase === "done" && (
             <p className="text-[12.5px]" style={{ color: TEXT_QUIET }}>
-              Redirecting to the dashboard…
+              Redirecting to the endpoint map…
             </p>
           )}
         </div>
