@@ -1,38 +1,108 @@
 // src/pages/RepoDetail.tsx
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
+import {
+  ArrowLeft,
+  Search,
+  Check,
+  Code2,
+  GitBranch,
+  KeyRound,
+} from "lucide-react";
 import { useAppDispatch, useAppSelector } from "../store/hooks";
 import { fetchRepoDetail } from "../store/slices/reposSlice";
 import ObservabilityLauncher from "../components/ObservabilityLauncher";
 import MissingEnvPanel from "../components/MissingEnvPanel";
-import {
-  SANS,
-  MONO,
-  BG,
-  SURFACE,
-  SURFACE_RAISED,
-  BORDER,
-  BORDER_STRONG,
-  TEXT_PRIMARY,
-  TEXT_SECONDARY,
-  TEXT_TERTIARY,
-  TEXT_QUIET,
-  ACCENT,
-  ACCENT_SOFT,
-  ACCENT_TEXT,
-  LIVE,
-  CONTENT_MAX_WIDTH,
-} from "../theme";
+import { SANS, MONO, CONTENT_MAX_WIDTH } from "../theme";
+import { GLASS } from "../styles/glass";
 
-// Mutating verbs change state on the server — they get the signal color.
-// Safe verbs (GET/HEAD/OPTIONS) stay quiet.
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 const SETUP_STEPS = [
-  "Repository cloned",
-  "Framework detected",
-  "Routes mapped",
+  { label: "Repository cloned", detail: "git clone over your GitHub grant" },
+  {
+    label: "Framework detected",
+    detail: "route conventions parsed from source",
+  },
+  { label: "Routes mapped", detail: "every handler indexed by file:line" },
 ];
+
+function AmbientGlow() {
+  return (
+    <>
+      <div
+        className="pointer-events-none fixed -left-32 -top-32 h-[420px] w-[420px] rounded-full blur-[110px]"
+        style={{
+          background:
+            "radial-gradient(circle, rgba(255,198,41,0.30), transparent 70%)",
+        }}
+      />
+      <div
+        className="pointer-events-none fixed -bottom-40 -right-24 h-[480px] w-[480px] rounded-full blur-[120px]"
+        style={{
+          background:
+            "radial-gradient(circle, rgba(255,198,41,0.22), transparent 70%)",
+        }}
+      />
+    </>
+  );
+}
+
+function GlassCard({
+  className = "",
+  children,
+  style,
+}: {
+  className?: string;
+  children: React.ReactNode;
+  style?: React.CSSProperties;
+}) {
+  return (
+    <div
+      className={`rounded-3xl border backdrop-blur-xl ${className}`}
+      style={{
+        background: GLASS.glassBg,
+        borderColor: GLASS.border,
+        boxShadow: GLASS.shadow,
+        ...style,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function LivePill({ live }: { live: boolean }) {
+  return (
+    <span
+      className="flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[12px] font-semibold backdrop-blur-md"
+      style={
+        live
+          ? {
+              background: GLASS.accentSoft,
+              borderColor: "transparent",
+              color: GLASS.accentText,
+            }
+          : {
+              background: "rgba(255,255,255,0.5)",
+              borderColor: GLASS.border,
+              color: GLASS.textTertiary,
+            }
+      }
+    >
+      <span
+        className="h-1.5 w-1.5 rounded-full"
+        style={{
+          background: live ? GLASS.accent : GLASS.textQuiet,
+          animation: live
+            ? "repoLivePulse 1.8s ease-in-out infinite"
+            : undefined,
+        }}
+      />
+      {live ? "Live" : "Ready"}
+    </span>
+  );
+}
 
 export default function RepoDetail() {
   const { repositoryId } = useParams<{ repositoryId: string }>();
@@ -63,15 +133,26 @@ export default function RepoDetail() {
     );
   }, [repo, routeFilter]);
 
+  const mutatingCount = useMemo(
+    () =>
+      filteredRoutes.filter((r) => MUTATING_METHODS.has(r.method.toUpperCase()))
+        .length,
+    [filteredRoutes],
+  );
+
   if (!repositoryId) return null;
 
   if (!repo) {
     return (
       <div
-        className="min-h-screen px-10 py-10"
-        style={{ background: BG, fontFamily: SANS }}
+        className="relative min-h-screen px-10 py-10"
+        style={{ background: GLASS.page, fontFamily: SANS }}
       >
-        <p className="text-[13px]" style={{ color: TEXT_TERTIARY }}>
+        <AmbientGlow />
+        <p
+          className="relative text-[13px]"
+          style={{ color: GLASS.textTertiary }}
+        >
           Loading repository…
         </p>
       </div>
@@ -80,28 +161,30 @@ export default function RepoDetail() {
 
   const repoName = repo.githubFullName.split("/")[1];
 
-  const stats: { label: string; value: string | number; color?: string }[] = [
+  const HEADER_STATS: {
+    icon: typeof Code2;
+    label: string;
+    value: string | number;
+    color?: string;
+  }[] = [
     {
+      icon: Code2,
       label: "Framework",
       value: repo.framework === "express" ? "Express" : repo.framework,
     },
-    { label: "Routes", value: repo.routes.length },
+    { icon: GitBranch, label: "Routes", value: repo.routes.length },
     {
+      icon: KeyRound,
       label: "Environment",
       value: envReady ? "Configured" : "Pending",
-      color: envReady ? LIVE : TEXT_TERTIARY,
-    },
-    {
-      label: "Observability",
-      value: launched ? "Live" : "Not started",
-      color: launched ? ACCENT_TEXT : TEXT_TERTIARY,
+      color: envReady ? GLASS.live : GLASS.textTertiary,
     },
   ];
 
   return (
     <div
-      className="min-h-screen w-full"
-      style={{ background: BG, fontFamily: SANS }}
+      className="relative min-h-screen w-full"
+      style={{ background: GLASS.page, fontFamily: SANS }}
     >
       <style>{`
         @keyframes repoLivePulse {
@@ -110,182 +193,201 @@ export default function RepoDetail() {
         }
       `}</style>
 
+      <AmbientGlow />
+
       <div
-        className="mx-auto w-full px-8 py-10 lg:px-12"
+        className="relative mx-auto w-full px-8 py-10 lg:px-12"
         style={{ maxWidth: CONTENT_MAX_WIDTH }}
       >
         <button
           type="button"
           onClick={() => navigate("/workspace")}
           className="mb-6 flex items-center gap-1.5 text-[13px] font-medium transition-colors"
-          style={{ color: TEXT_TERTIARY }}
-          onMouseEnter={(e) => (e.currentTarget.style.color = TEXT_PRIMARY)}
-          onMouseLeave={(e) => (e.currentTarget.style.color = TEXT_TERTIARY)}
+          style={{ color: GLASS.textTertiary }}
+          onMouseEnter={(e) => (e.currentTarget.style.color = GLASS.text)}
+          onMouseLeave={(e) =>
+            (e.currentTarget.style.color = GLASS.textTertiary)
+          }
         >
-          ← Repositories
+          <ArrowLeft size={14} /> Repositories
         </button>
 
-        {/* Identity row */}
-        <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
-          <div className="flex items-center gap-4">
+        {/* Identity card */}
+        <GlassCard className="mb-6 flex flex-wrap items-center gap-6 p-6">
+          <div className="flex min-w-0 items-center gap-4">
             <div
-              className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg border text-[15px] font-semibold"
+              className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl text-[14px] font-bold"
               style={{
-                borderColor: BORDER_STRONG,
-                background: SURFACE_RAISED,
-                color: TEXT_PRIMARY,
+                background: `linear-gradient(135deg, ${GLASS.accent}, #FFE28A)`,
+                color: GLASS.accentOn,
                 fontFamily: MONO,
+                boxShadow: "0 6px 18px rgba(255,198,41,0.35)",
               }}
             >
               {repoName.slice(0, 2).toUpperCase()}
             </div>
-            <div>
+            <div className="min-w-0">
               <h1
-                className="text-[24px] font-semibold leading-[1.15] tracking-[-0.01em]"
-                style={{ color: TEXT_PRIMARY }}
+                className="truncate text-[20px] font-bold leading-[1.2] tracking-[-0.01em]"
+                style={{ color: GLASS.text }}
               >
                 {repoName}
               </h1>
               <p
-                className="mt-0.5 text-[12.5px]"
-                style={{ color: TEXT_TERTIARY, fontFamily: MONO }}
+                className="mt-0.5 truncate text-[12px]"
+                style={{ color: GLASS.textTertiary, fontFamily: MONO }}
               >
                 {repo.githubFullName}
               </p>
             </div>
           </div>
 
-          <span
-            className="flex items-center gap-2 rounded-full px-3 py-1.5 text-[12px] font-semibold"
-            style={
-              launched
-                ? { background: ACCENT_SOFT, color: ACCENT_TEXT }
-                : { border: `1px solid ${BORDER}`, color: TEXT_TERTIARY }
-            }
-          >
-            <span
-              className="h-1.5 w-1.5 rounded-full"
-              style={{
-                background: launched ? ACCENT : TEXT_QUIET,
-                animation: launched
-                  ? "repoLivePulse 1.8s ease-in-out infinite"
-                  : undefined,
-              }}
-            />
-            {launched ? "Live" : "Ready"}
-          </span>
-        </div>
+          <LivePill live={launched} />
 
-        {/* Stat strip */}
-        <div
-          className="mb-8 flex flex-wrap items-stretch rounded-xl border"
-          style={{ borderColor: BORDER, background: SURFACE }}
-        >
-          {stats.map((stat, idx) => (
-            <div
-              key={stat.label}
-              className="min-w-[140px] flex-1 px-6 py-4"
-              style={{
-                borderRight:
-                  idx < stats.length - 1 ? `1px solid ${BORDER}` : undefined,
-              }}
-            >
-              <p
-                className="text-[11px] font-medium uppercase tracking-wide"
-                style={{ color: TEXT_QUIET }}
+          <div
+            className="flex flex-1 flex-wrap items-center justify-end gap-3"
+            style={{ minWidth: 260 }}
+          >
+            {HEADER_STATS.map((stat) => (
+              <div
+                key={stat.label}
+                className="flex items-center gap-2.5 rounded-2xl px-3.5 py-2"
+                style={{ background: "rgba(20,20,10,0.03)" }}
               >
-                {stat.label}
-              </p>
-              <p
-                className="mt-1.5 text-[15px] font-semibold"
-                style={{ color: stat.color ?? TEXT_PRIMARY }}
-              >
-                {stat.value}
-              </p>
-            </div>
-          ))}
-        </div>
+                <span
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full"
+                  style={{ background: GLASS.accentSoft }}
+                >
+                  <stat.icon size={13} style={{ color: GLASS.accentText }} />
+                </span>
+                <div>
+                  <p
+                    className="text-[9.5px] font-semibold uppercase tracking-[0.08em]"
+                    style={{ color: GLASS.textQuiet }}
+                  >
+                    {stat.label}
+                  </p>
+                  <p
+                    className="text-[13px] font-bold"
+                    style={{ color: stat.color ?? GLASS.text }}
+                  >
+                    {stat.value}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </GlassCard>
 
         {/* Body: routes (main) + setup rail (aside) */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_360px]">
           <div className="flex flex-col gap-6">
-            {/* Setup checklist */}
-            <div
-              className="rounded-xl border p-5"
-              style={{ borderColor: BORDER, background: SURFACE }}
-            >
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-3">
+            {/* Setup pipeline — a real 3-step sequence, so it earns numbering */}
+            <GlassCard className="p-6">
+              <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:gap-0">
                 {SETUP_STEPS.map((step, idx) => (
-                  <div key={step} className="flex items-center gap-2">
-                    <div
-                      className="flex items-center gap-2 text-[13px] font-medium"
-                      style={{ color: TEXT_SECONDARY }}
-                    >
+                  <div
+                    key={step.label}
+                    className="flex flex-1 items-start gap-3"
+                  >
+                    <div className="flex flex-col items-center">
                       <span
-                        className="flex h-4 w-4 items-center justify-center rounded-full text-[9px] font-bold"
-                        style={{ background: TEXT_PRIMARY, color: BG }}
+                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-bold"
+                        style={{
+                          background: `linear-gradient(135deg, ${GLASS.accent}, #FFE28A)`,
+                          color: GLASS.accentOn,
+                          boxShadow: "0 4px 12px rgba(255,198,41,0.35)",
+                        }}
                       >
-                        ✓
+                        <Check size={13} />
                       </span>
-                      {step}
+                      {idx < SETUP_STEPS.length - 1 && (
+                        <span
+                          className="mt-1.5 hidden h-px w-full sm:block"
+                          style={{
+                            background: `linear-gradient(90deg, ${GLASS.accentSoft}, transparent)`,
+                          }}
+                        />
+                      )}
                     </div>
-                    {idx < SETUP_STEPS.length - 1 && (
-                      <span
-                        className="mx-1 h-px w-6"
-                        style={{ background: BORDER_STRONG }}
-                      />
-                    )}
+                    <div className="min-w-0 pb-2">
+                      <p
+                        className="text-[10.5px] font-bold"
+                        style={{ color: GLASS.accentText, fontFamily: MONO }}
+                      >
+                        {String(idx + 1).padStart(2, "0")}
+                      </p>
+                      <p
+                        className="text-[13px] font-semibold"
+                        style={{ color: GLASS.text }}
+                      >
+                        {step.label}
+                      </p>
+                      <p
+                        className="mt-0.5 text-[11.5px]"
+                        style={{ color: GLASS.textTertiary }}
+                      >
+                        {step.detail}
+                      </p>
+                    </div>
                   </div>
                 ))}
               </div>
-            </div>
+            </GlassCard>
 
             {/* Routes */}
-            <div
-              className="rounded-xl border"
-              style={{ borderColor: BORDER, background: SURFACE }}
-            >
+            <GlassCard className="overflow-hidden">
               <div
-                className="flex flex-wrap items-center justify-between gap-3 border-b px-5 py-4"
-                style={{ borderColor: BORDER }}
+                className="flex flex-wrap items-center justify-between gap-3 border-b px-6 py-4"
+                style={{ borderColor: GLASS.border }}
               >
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2.5">
                   <span
-                    className="text-[13px] font-semibold"
-                    style={{ color: TEXT_PRIMARY }}
+                    className="text-[14px] font-bold"
+                    style={{ color: GLASS.text }}
                   >
                     Routes
                   </span>
                   <span
-                    className="text-[13px]"
-                    style={{ color: TEXT_TERTIARY }}
+                    className="flex items-center gap-1.5 text-[11.5px] font-semibold"
+                    style={{ fontFamily: MONO }}
                   >
-                    {repo.routes.length}
+                    <span style={{ color: GLASS.accentText }}>
+                      {mutatingCount} mutating
+                    </span>
+                    <span style={{ color: GLASS.textQuiet }}>·</span>
+                    <span style={{ color: GLASS.textQuiet }}>
+                      {filteredRoutes.length - mutatingCount} safe
+                    </span>
                   </span>
                 </div>
-                <input
-                  type="text"
-                  value={routeFilter}
-                  onChange={(e) => setRouteFilter(e.target.value)}
-                  placeholder="Filter by path or method"
-                  className="w-56 rounded-lg border px-3 py-1.5 text-[12.5px] outline-none transition-colors"
+
+                <div
+                  className="flex w-60 items-center gap-2 rounded-full border px-4 py-2 transition-colors"
                   style={{
-                    borderColor: BORDER,
-                    background: BG,
-                    color: TEXT_PRIMARY,
-                    fontFamily: MONO,
+                    borderColor: GLASS.border,
+                    background: "rgba(20,20,10,0.03)",
                   }}
-                  onFocus={(e) => (e.currentTarget.style.borderColor = ACCENT)}
-                  onBlur={(e) => (e.currentTarget.style.borderColor = BORDER)}
-                />
+                  onFocus={undefined}
+                >
+                  <Search size={13} style={{ color: GLASS.textQuiet }} />
+                  <input
+                    type="text"
+                    value={routeFilter}
+                    onChange={(e) => setRouteFilter(e.target.value)}
+                    placeholder="Filter by path or method"
+                    className="w-full bg-transparent text-[12.5px] outline-none"
+                    style={{ color: GLASS.text, fontFamily: MONO }}
+                  />
+                </div>
               </div>
 
               {filteredRoutes.length === 0 ? (
                 <p
                   className="px-5 py-8 text-center text-[13px]"
-                  style={{ color: TEXT_QUIET }}
+                  style={{ color: GLASS.textQuiet }}
                 >
-                  No routes match “{routeFilter}”.
+                  No routes match "{routeFilter}".
                 </p>
               ) : (
                 <div>
@@ -296,73 +398,77 @@ export default function RepoDetail() {
                     return (
                       <div
                         key={`${route.method}-${route.routePath}-${route.line}`}
-                        className="flex items-center gap-4 border-b px-5 py-3 transition-colors last:border-b-0"
-                        style={{ borderColor: BORDER }}
+                        className="flex items-center gap-4 border-b px-6 py-3.5 transition-colors last:border-b-0"
+                        style={{ borderColor: GLASS.border }}
                         onMouseEnter={(e) =>
-                          (e.currentTarget.style.background = SURFACE_RAISED)
+                          (e.currentTarget.style.background =
+                            "rgba(255,198,41,0.05)")
                         }
                         onMouseLeave={(e) =>
                           (e.currentTarget.style.background = "transparent")
                         }
                       >
                         <span
-                          className="w-16 shrink-0 rounded-md px-2 py-0.5 text-center text-[11px] font-bold"
+                          className="w-16 shrink-0 rounded-full py-1 text-center text-[11px] font-bold"
                           style={
                             mutating
-                              ? { background: ACCENT_SOFT, color: ACCENT_TEXT }
+                              ? {
+                                  background: GLASS.accent,
+                                  color: GLASS.accentOn,
+                                }
                               : {
-                                  border: `1px solid ${BORDER_STRONG}`,
-                                  color: TEXT_SECONDARY,
+                                  border: `1px solid ${GLASS.borderStrong}`,
+                                  color: GLASS.textSecondary,
                                 }
                           }
                         >
                           {route.method}
                         </span>
-                        <span
-                          className="text-[13px]"
-                          style={{ color: TEXT_PRIMARY, fontFamily: MONO }}
-                        >
-                          {route.routePath}
-                        </span>
-                        <span
-                          className="ml-auto shrink-0 text-[11px]"
-                          style={{ color: TEXT_QUIET, fontFamily: MONO }}
-                        >
-                          {route.file}:{route.line}
-                        </span>
+
+                        <div className="min-w-0 flex-1">
+                          <p
+                            className="truncate text-[13px] font-medium"
+                            style={{ color: GLASS.text, fontFamily: MONO }}
+                          >
+                            {route.routePath}
+                          </p>
+                          <p
+                            className="mt-0.5 truncate text-[11px]"
+                            style={{ color: GLASS.textQuiet, fontFamily: MONO }}
+                          >
+                            {route.file}:{route.line}
+                          </p>
+                        </div>
                       </div>
                     );
                   })}
                 </div>
               )}
-            </div>
+            </GlassCard>
           </div>
 
           {/* Control rail */}
           <div className="flex flex-col gap-6">
             {launched && (
-              <div
-                className="rounded-xl border p-5"
-                style={{ borderColor: BORDER, background: SURFACE }}
-              >
+              <GlassCard className="p-6">
                 <div className="mb-3 flex items-center gap-2">
                   <span
                     className="h-1.5 w-1.5 rounded-full"
                     style={{
-                      background: ACCENT,
+                      background: GLASS.accent,
                       animation: "repoLivePulse 1.8s ease-in-out infinite",
                     }}
                   />
                   <span
-                    className="text-[13px] font-semibold"
-                    style={{ color: TEXT_PRIMARY }}
+                    className="text-[13px] font-bold"
+                    style={{ color: GLASS.text }}
                   >
                     Service observability
                   </span>
                 </div>
                 <p
                   className="mb-4 text-[12.5px]"
-                  style={{ color: TEXT_TERTIARY }}
+                  style={{ color: GLASS.textTertiary }}
                 >
                   Logs, traces, metrics, CPU, memory and endpoint activity,
                   live.
@@ -372,12 +478,16 @@ export default function RepoDetail() {
                   onClick={() =>
                     navigate(`/workspace/repos/${repositoryId}/observability`)
                   }
-                  className="w-full rounded-lg px-4 py-2.5 text-[13px] font-semibold transition-opacity hover:opacity-90"
-                  style={{ background: ACCENT, color: TEXT_PRIMARY }}
+                  className="w-full rounded-xl px-4 py-2.5 text-[13px] font-bold transition-all hover:brightness-105"
+                  style={{
+                    background: GLASS.accent,
+                    color: GLASS.accentOn,
+                    boxShadow: "0 8px 20px rgba(255,198,41,0.35)",
+                  }}
                 >
                   Open dashboard →
                 </button>
-              </div>
+              </GlassCard>
             )}
 
             <MissingEnvPanel

@@ -3,23 +3,29 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { io, type Socket } from "socket.io-client";
 import { startRun, getRun } from "../api/repos";
-import {
-  SANS,
-  MONO,
-  BG,
-  SURFACE,
-  SURFACE_RAISED,
-  BORDER,
-  BORDER_STRONG,
-  TEXT_PRIMARY,
-  TEXT_SECONDARY,
-  TEXT_TERTIARY,
-  TEXT_QUIET,
-  ACCENT,
-  ACCENT_HOVER,
-  ERROR,
-  ERROR_SOFT,
-} from "../theme";
+import { SANS, MONO } from "../theme";
+import { GLASS } from "../styles/glass";
+
+function AmbientGlow() {
+  return (
+    <>
+      <div
+        className="pointer-events-none fixed -left-32 -top-32 h-[420px] w-[420px] rounded-full blur-[110px]"
+        style={{
+          background:
+            "radial-gradient(circle, rgba(255,198,41,0.30), transparent 70%)",
+        }}
+      />
+      <div
+        className="pointer-events-none fixed -bottom-40 -right-24 h-[480px] w-[480px] rounded-full blur-[120px]"
+        style={{
+          background:
+            "radial-gradient(circle, rgba(255,198,41,0.22), transparent 70%)",
+        }}
+      />
+    </>
+  );
+}
 
 interface ObservabilityLauncherProps {
   repositoryId: string;
@@ -225,16 +231,21 @@ export default function ObservabilityLauncher({
 
       {phase === "idle" && (
         <div
-          className="rounded-xl border p-5"
-          style={{ borderColor: BORDER, background: SURFACE, fontFamily: SANS }}
+          className="rounded-3xl border p-6 backdrop-blur-xl"
+          style={{
+            borderColor: GLASS.border,
+            background: GLASS.glassBg,
+            boxShadow: GLASS.shadow,
+            fontFamily: SANS,
+          }}
         >
-          <h3
-            className="text-[13px] font-semibold"
-            style={{ color: TEXT_PRIMARY }}
-          >
+          <h3 className="text-[14px] font-bold" style={{ color: GLASS.text }}>
             Start monitoring
           </h3>
-          <p className="mt-1.5 text-[12.5px]" style={{ color: TEXT_TERTIARY }}>
+          <p
+            className="mt-1.5 text-[12.5px]"
+            style={{ color: GLASS.textTertiary }}
+          >
             {envReady
               ? "Boots the service with tracing already attached, then opens the endpoint map automatically."
               : "Add the environment variables above to continue."}
@@ -243,21 +254,26 @@ export default function ObservabilityLauncher({
             type="button"
             onClick={handleLaunch}
             disabled={!envReady}
-            className="mt-4 w-full rounded-lg px-4 py-2.5 text-[13px] font-semibold transition-colors disabled:cursor-not-allowed"
+            className="mt-4 w-full rounded-xl px-4 py-2.5 text-[13px] font-bold transition-all disabled:cursor-not-allowed"
             style={
               envReady
-                ? { background: ACCENT, color: TEXT_PRIMARY }
+                ? {
+                    background: GLASS.accent,
+                    color: GLASS.accentOn,
+                    boxShadow: "0 8px 20px rgba(255,198,41,0.35)",
+                  }
                 : {
-                    background: SURFACE_RAISED,
-                    color: TEXT_QUIET,
-                    border: `1px solid ${BORDER}`,
+                    background: GLASS.fieldBg,
+                    color: GLASS.textQuiet,
+                    border: `1px solid ${GLASS.border}`,
                   }
             }
             onMouseEnter={(e) => {
-              if (envReady) e.currentTarget.style.background = ACCENT_HOVER;
+              if (envReady)
+                e.currentTarget.style.background = GLASS.accentHover;
             }}
             onMouseLeave={(e) => {
-              if (envReady) e.currentTarget.style.background = ACCENT;
+              if (envReady) e.currentTarget.style.background = GLASS.accent;
             }}
           >
             Start monitoring →
@@ -271,24 +287,31 @@ export default function ObservabilityLauncher({
       {isOverlayPhase && (
         <div
           className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-8"
-          style={{ background: BG, fontFamily: SANS }}
+          style={{ background: GLASS.page, fontFamily: SANS }}
         >
+          <AmbientGlow />
+
           <span
-            className="text-[11px] font-semibold uppercase tracking-[0.24em]"
-            style={{ color: TEXT_TERTIARY, fontFamily: MONO }}
+            className="relative rounded-full border px-3 py-1 text-[11px] font-bold uppercase tracking-[0.24em] backdrop-blur-md"
+            style={{
+              color: GLASS.accentOn,
+              fontFamily: MONO,
+              background: GLASS.accentSoft,
+              borderColor: "transparent",
+            }}
           >
             Booting · {elapsed}s
           </span>
 
           <h1
             key={phase}
-            className="px-6 text-center text-[32px] font-semibold tracking-tight sm:text-[46px]"
-            style={{ color: TEXT_PRIMARY, animation: "obsFadeUp 0.4s ease" }}
+            className="relative px-6 text-center text-[32px] font-bold tracking-tight sm:text-[46px]"
+            style={{ color: GLASS.text, animation: "obsFadeUp 0.4s ease" }}
           >
             {phase === "done" ? "Ready" : STEPS[currentIndex]?.label}
           </h1>
 
-          <div className="flex items-center gap-2">
+          <div className="relative flex items-center gap-2">
             {STEPS.map((step, idx) => {
               const done = idx < currentIndex || phase === "done";
               const current = idx === currentIndex && phase !== "done";
@@ -298,7 +321,8 @@ export default function ObservabilityLauncher({
                   className="h-1.5 rounded-full transition-all duration-300"
                   style={{
                     width: current ? 28 : 8,
-                    background: done || current ? ACCENT : BORDER_STRONG,
+                    background:
+                      done || current ? GLASS.accent : GLASS.borderStrong,
                     animation: current
                       ? "obsPulse 1.6s ease-in-out infinite"
                       : undefined,
@@ -310,9 +334,9 @@ export default function ObservabilityLauncher({
 
           {phase === "installing" && elapsed >= SLOW_INSTALL_HINT_SECONDS && (
             <p
-              className="max-w-[360px] text-center text-[12.5px]"
+              className="relative max-w-[360px] text-center text-[12.5px]"
               style={{
-                color: TEXT_QUIET,
+                color: GLASS.textQuiet,
                 animation: "obsHintFadeIn 0.5s ease",
               }}
             >
@@ -322,7 +346,10 @@ export default function ObservabilityLauncher({
           )}
 
           {phase === "done" && (
-            <p className="text-[12.5px]" style={{ color: TEXT_QUIET }}>
+            <p
+              className="relative text-[12.5px]"
+              style={{ color: GLASS.textQuiet }}
+            >
               Redirecting to the endpoint map…
             </p>
           )}
@@ -332,34 +359,41 @@ export default function ObservabilityLauncher({
       {phase === "error" && (
         <div
           className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-4 px-6"
-          style={{ background: BG, fontFamily: SANS }}
+          style={{ background: GLASS.page, fontFamily: SANS }}
         >
+          <AmbientGlow />
           <span
-            className="flex h-8 w-8 items-center justify-center rounded-full text-[14px]"
-            style={{ background: ERROR_SOFT, color: ERROR }}
+            className="relative flex h-9 w-9 items-center justify-center rounded-full text-[14px] font-bold"
+            style={{ background: GLASS.errorSoft, color: GLASS.error }}
           >
             !
           </span>
           <h1
-            className="text-center text-[28px] font-semibold tracking-tight sm:text-[38px]"
-            style={{ color: TEXT_PRIMARY }}
+            className="relative text-center text-[28px] font-bold tracking-tight sm:text-[38px]"
+            style={{ color: GLASS.text }}
           >
             Launch failed
           </h1>
           <p
-            className="max-w-[420px] text-center text-[13.5px]"
-            style={{ color: TEXT_SECONDARY }}
+            className="relative max-w-[420px] text-center text-[13.5px]"
+            style={{ color: GLASS.textSecondary }}
           >
             {error}
           </p>
           <button
             type="button"
             onClick={handleRetry}
-            className="mt-2 rounded-lg border px-5 py-2.5 text-[13px] font-semibold transition-colors"
-            style={{ borderColor: BORDER_STRONG, color: TEXT_PRIMARY }}
-            onMouseEnter={(e) => (e.currentTarget.style.borderColor = ERROR)}
+            className="relative mt-2 rounded-xl border px-5 py-2.5 text-[13px] font-bold backdrop-blur-md transition-colors"
+            style={{
+              borderColor: GLASS.borderStrong,
+              color: GLASS.text,
+              background: GLASS.glassBg,
+            }}
+            onMouseEnter={(e) =>
+              (e.currentTarget.style.borderColor = GLASS.error)
+            }
             onMouseLeave={(e) =>
-              (e.currentTarget.style.borderColor = BORDER_STRONG)
+              (e.currentTarget.style.borderColor = GLASS.borderStrong)
             }
           >
             Retry
