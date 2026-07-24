@@ -1,38 +1,656 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { Highlight, themes } from "prism-react-renderer";
+import {
+  Sparkles,
+  Loader2,
+  Check,
+  GitPullRequest,
+  Cpu,
+  MemoryStick,
+  Activity,
+} from "lucide-react";
+import {
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+} from "recharts";
 import ConnectGithubButton from "../components/ConnectGithubButton";
 import { useAppDispatch, useAppSelector } from "../store/hooks";
 import { checkSession } from "../store/slices/authSlice";
+import {
+  SANS,
+  BG,
+  SURFACE,
+  BORDER,
+  BORDER_STRONG,
+  TEXT_PRIMARY,
+  TEXT_SECONDARY,
+  TEXT_TERTIARY,
+  TEXT_QUIET,
+  ACCENT,
+  ACCENT_HOVER,
+  ACCENT_TEXT,
+  LIVE,
+  LIVE_SOFT,
+  ERROR,
+} from "../theme";
 
-/**
- * Axiom AI — Landing Page
- * Styled after Linear's design system (void/carbon/acid-lime tokens).
- * Purely public: no repo list, no user state rendered here. If a signed-in
- * user lands here, they're bounced straight to /workspace.
- */
 
-const NAV_LINKS = ["Product", "Workflow", "Benchmarks", "Pricing", "Docs"];
+const NAV_LINKS = ["Product", "How it works", "Benchmarks", "Docs"];
 
-const FEATURES = [
+
+const ADD_BG = "#0f2415";
+const ADD_FG = "#7ee2a8";
+const DEL_BG = "#2a1414";
+const DEL_FG = "#f29b9b";
+const HUNK_FG = "#6e6e6e";
+const CTX_FG = "#b3b3b3";
+const GUTTER_FG = "#5a5a58";
+const DIFF_MONO = "'Berkeley Mono', ui-monospace, monospace";
+
+const WINDOW_BG = "#111110";
+const WINDOW_BORDER = "#26261f";
+const TAB_BG = "#1a1a17";
+
+type DiffRow = {
+  type: "add" | "del" | "ctx" | "hunk" | "meta";
+  content: string;
+  oldLine: number | null;
+  newLine: number | null;
+};
+
+function parseUnifiedDiff(diff: string): DiffRow[] {
+  const rows: DiffRow[] = [];
+  let oldNum = 0;
+  let newNum = 0;
+  for (const raw of diff.split("\n")) {
+    if (raw.startsWith("@@")) {
+      const m = raw.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      if (m) {
+        oldNum = parseInt(m[1], 10);
+        newNum = parseInt(m[2], 10);
+      }
+      rows.push({ type: "hunk", content: raw, oldLine: null, newLine: null });
+    } else if (raw.startsWith("+++") || raw.startsWith("---")) {
+      rows.push({ type: "meta", content: raw, oldLine: null, newLine: null });
+    } else if (raw.startsWith("+")) {
+      rows.push({
+        type: "add",
+        content: raw.slice(1),
+        oldLine: null,
+        newLine: newNum,
+      });
+      newNum++;
+    } else if (raw.startsWith("-")) {
+      rows.push({
+        type: "del",
+        content: raw.slice(1),
+        oldLine: oldNum,
+        newLine: null,
+      });
+      oldNum++;
+    } else {
+      rows.push({
+        type: "ctx",
+        content: raw.startsWith(" ") ? raw.slice(1) : raw,
+        oldLine: oldNum,
+        newLine: newNum,
+      });
+      oldNum++;
+      newNum++;
+    }
+  }
+  return rows;
+}
+
+function CodeWindowChrome({
+  fileName,
+  badge,
+}: {
+  fileName: string;
+  badge?: React.ReactNode;
+}) {
+  return (
+    <div
+      className="flex items-center justify-between border-b px-4 py-2.5"
+      style={{ borderColor: WINDOW_BORDER, background: TAB_BG }}
+    >
+      <div className="flex items-center gap-3">
+        <div className="flex items-center gap-1.5">
+          <span
+            className="h-2.5 w-2.5 rounded-full"
+            style={{ background: "#3a3a35" }}
+          />
+          <span
+            className="h-2.5 w-2.5 rounded-full"
+            style={{ background: "#3a3a35" }}
+          />
+          <span
+            className="h-2.5 w-2.5 rounded-full"
+            style={{ background: "#3a3a35" }}
+          />
+        </div>
+        <span
+          className="text-[12.5px]"
+          style={{ fontFamily: DIFF_MONO, color: "#9a9a92" }}
+        >
+          {fileName}
+        </span>
+      </div>
+      {badge}
+    </div>
+  );
+}
+
+function DiffViewer({
+  fileName,
+  unifiedDiff,
+}: {
+  fileName: string;
+  unifiedDiff: string;
+}) {
+  const rows = parseUnifiedDiff(unifiedDiff);
+  const additions = rows.filter((r) => r.type === "add").length;
+  const deletions = rows.filter((r) => r.type === "del").length;
+
+  return (
+    <div
+      className="overflow-hidden rounded-xl border shadow-[0_20px_60px_-20px_rgba(0,0,0,0.5)]"
+      style={{ borderColor: WINDOW_BORDER, background: WINDOW_BG }}
+    >
+      <CodeWindowChrome
+        fileName={fileName}
+        badge={
+          <div className="flex items-center gap-3">
+            <span
+              className="flex items-center gap-1.5 text-[11.5px] font-medium"
+              style={{ fontFamily: DIFF_MONO }}
+            >
+              <span style={{ color: ADD_FG }}>+{additions}</span>
+              <span style={{ color: DEL_FG }}>-{deletions}</span>
+            </span>
+            <span
+              className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
+              style={{ background: ACCENT, color: "#1a1400" }}
+            >
+              <Check size={11} /> Applied automatically
+            </span>
+          </div>
+        }
+      />
+      <pre
+        className="m-0 py-2"
+        style={{
+          fontFamily: DIFF_MONO,
+          fontSize: 12.5,
+          lineHeight: 1.7,
+          overflow: "hidden",
+        }}
+      >
+        {rows.map((row, i) => {
+          let bg = "transparent";
+          let color = CTX_FG;
+          if (row.type === "hunk" || row.type === "meta") color = HUNK_FG;
+          else if (row.type === "add") {
+            bg = ADD_BG;
+            color = ADD_FG;
+          } else if (row.type === "del") {
+            bg = DEL_BG;
+            color = DEL_FG;
+          }
+          const showGutter =
+            row.type === "add" || row.type === "del" || row.type === "ctx";
+          return (
+            <div key={i} style={{ background: bg, display: "flex" }}>
+              {showGutter && (
+                <span
+                  className="flex shrink-0 select-none"
+                  style={{ fontSize: 11.5, color: GUTTER_FG }}
+                >
+                  <span
+                    style={{ width: 32, textAlign: "right", paddingRight: 8 }}
+                  >
+                    {row.oldLine ?? ""}
+                  </span>
+                  <span
+                    style={{ width: 32, textAlign: "right", paddingRight: 12 }}
+                  >
+                    {row.newLine ?? ""}
+                  </span>
+                </span>
+              )}
+              <span
+                style={{
+                  color,
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                  paddingRight: 20,
+                  paddingLeft: showGutter ? 0 : 16,
+                }}
+              >
+                {row.content || " "}
+              </span>
+            </div>
+          );
+        })}
+      </pre>
+    </div>
+  );
+}
+
+const WINNING_DIFF = `--- a/src/routes/orders.ts
++++ b/src/routes/orders.ts
+@@ -12,15 +12,14 @@ router.post("/checkout", async (req, res) => {
+   const cart = await Cart.findById(req.body.cartId);
+-  const items = [];
+-  for (const line of cart.lines) {
+-    const product = await Product.findById(line.productId);
+-    items.push({ ...line, product });
+-  }
++  const productIds = cart.lines.map((line) => line.productId);
++  const products = await Product.find({ _id: { $in: productIds } }).lean();
++  const byId = new Map(products.map((p) => [p._id.toString(), p]));
++  const items = cart.lines.map((line) => ({
++    ...line,
++    product: byId.get(line.productId.toString()),
++  }));
+ 
+-  const inventory = await checkInventory(items);
+-  const payment = await chargeCard(req.body.token, cart.total);
++  const [inventory, payment] = await Promise.all([
++    checkInventory(items),
++    chargeCard(req.body.token, cart.total),
++  ]);
+`;
+
+
+const DEMO_SCRIPT = `import http from "k6/http";
+import { check, sleep } from "k6";
+
+export const options = {
+  vus: 100,
+  duration: "30s",
+};
+
+export default function () {
+  const productId = Math.ceil(Math.random() * 200);
+  const res = http.post(
+    \`\${__ENV.BASE_URL}/checkout\`,
+    JSON.stringify({ cartId: "cart_demo", productId }),
+    { headers: { "Content-Type": "application/json" } },
+  );
+
+  check(res, {
+    "status is 200": (r) => r.status === 200,
+    "latency < 800ms": (r) => r.timings.duration < 800,
+  });
+
+  sleep(1);
+}`;
+
+const DEMO_SCENARIO =
+  "100 concurrent users checking out with random products for 30 seconds.";
+
+function ScriptDemo() {
+  const [state, setState] = useState<"idle" | "generating" | "done">("idle");
+
+  const handleGenerate = () => {
+    setState("generating");
+    window.setTimeout(() => setState("done"), 900);
+  };
+
+  return (
+    <div className="grid grid-cols-1 gap-5 lg:grid-cols-2 lg:items-start">
+      <div
+        className="rounded-2xl border p-6"
+        style={{ borderColor: BORDER, background: SURFACE }}
+      >
+        <div className="mb-3 flex items-center gap-2">
+          <Sparkles size={15} style={{ color: ACCENT_TEXT }} />
+          <span
+            className="text-[13px] font-semibold"
+            style={{ color: TEXT_PRIMARY }}
+          >
+            Describe a load-test scenario
+          </span>
+        </div>
+        <textarea
+          value={DEMO_SCENARIO}
+          readOnly
+          spellCheck={false}
+          rows={3}
+          className="w-full resize-none rounded-lg border bg-transparent p-3 text-[14px] leading-[1.55] outline-none"
+          style={{
+            borderColor: BORDER_STRONG,
+            color: TEXT_PRIMARY,
+            cursor: "default",
+          }}
+        />
+        <button
+          onClick={handleGenerate}
+          disabled={state === "generating"}
+          className="mt-4 flex items-center justify-center gap-1.5 rounded-lg px-4 py-2 text-[13px] font-semibold transition-colors disabled:opacity-40"
+          style={{ background: ACCENT, color: "#1a1400" }}
+        >
+          {state === "generating" ? (
+            <Loader2 size={14} className="animate-spin" />
+          ) : (
+            <Sparkles size={14} />
+          )}
+          {state === "generating" ? "Writing script…" : "Generate script"}
+        </button>
+        <p
+          className="mt-4 text-[13px] leading-[1.6]"
+          style={{ color: TEXT_TERTIARY }}
+        >
+          This is the same generator running inside the product plain English
+          in, a runnable k6 script out, wired to the exact route you're
+          diagnosing.
+        </p>
+      </div>
+
+      <div
+        className="overflow-hidden rounded-xl border transition-opacity duration-300"
+        style={{
+          borderColor: WINDOW_BORDER,
+          background: WINDOW_BG,
+          opacity: state === "done" ? 1 : 0.4,
+        }}
+      >
+        <CodeWindowChrome fileName="checkout-load.k6.js" />
+        {state === "done" ? (
+          <Highlight
+            code={DEMO_SCRIPT}
+            language="javascript"
+            theme={themes.vsDark}
+          >
+            {({ className, tokens, getLineProps, getTokenProps }) => (
+              <pre
+                className={className}
+                style={{
+                  margin: 0,
+                  padding: "14px 16px",
+                  background: "transparent",
+                  fontFamily: DIFF_MONO,
+                  fontSize: 12.5,
+                  lineHeight: 1.7,
+                  overflow: "auto",
+                }}
+              >
+                {tokens.map((line, i) => (
+                  <div key={i} {...getLineProps({ line })}>
+                    {line.map((token, key) => (
+                      <span key={key} {...getTokenProps({ token })} />
+                    ))}
+                  </div>
+                ))}
+              </pre>
+            )}
+          </Highlight>
+        ) : (
+          <div
+            className="flex h-[220px] items-center justify-center text-[13px]"
+            style={{ color: "#6b6b64" }}
+          >
+            {state === "generating"
+              ? "Writing script…"
+              : "Waiting on a scenario"}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+interface TelemetryTick {
+  t: number;
+  cpu: number;
+  memory: number;
+  p50: number;
+  p95: number;
+}
+
+function useLiveTelemetry() {
+  const [history, setHistory] = useState<TelemetryTick[]>([]);
+  const stateRef = useRef({ cpu: 34, memory: 310, p50: 68, p95: 142 });
+
+  useEffect(() => {
+    const step = () => {
+      const s = stateRef.current;
+      s.cpu = Math.min(92, Math.max(18, s.cpu + (Math.random() - 0.5) * 10));
+      s.memory = Math.min(
+        560,
+        Math.max(260, s.memory + (Math.random() - 0.5) * 24),
+      );
+      s.p50 = Math.min(140, Math.max(38, s.p50 + (Math.random() - 0.5) * 12));
+      s.p95 = Math.min(
+        320,
+        Math.max(s.p50 + 30, s.p95 + (Math.random() - 0.5) * 22),
+      );
+      setHistory((prev) =>
+        [
+          ...prev,
+          {
+            t: Date.now(),
+            cpu: s.cpu,
+            memory: s.memory,
+            p50: s.p50,
+            p95: s.p95,
+          },
+        ].slice(-24),
+      );
+    };
+    step();
+    const id = window.setInterval(step, 1400);
+    return () => window.clearInterval(id);
+  }, []);
+
+  return history;
+}
+
+function LiveStat({
+  icon: Icon,
+  label,
+  value,
+  alert,
+}: {
+  icon: typeof Cpu;
+  label: string;
+  value: string;
+  alert?: boolean;
+}) {
+  return (
+    <div
+      className="rounded-xl border px-4 py-3"
+      style={{ borderColor: BORDER_STRONG, background: BG }}
+    >
+      <div
+        className="flex items-center gap-1.5 text-[10.5px] font-medium uppercase tracking-[0.06em]"
+        style={{ color: TEXT_QUIET }}
+      >
+        <Icon size={11} />
+        {label}
+      </div>
+      <div
+        className="mt-1.5 flex items-center gap-1.5 text-[18px] font-semibold"
+        style={{
+          color: TEXT_PRIMARY,
+          fontFamily: "'Berkeley Mono', ui-monospace, monospace",
+        }}
+      >
+        {value}
+        {alert && (
+          <span
+            className="h-1.5 w-1.5 rounded-full"
+            style={{ background: ERROR }}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LiveTelemetryDemo() {
+  const history = useLiveTelemetry();
+  const latest = history[history.length - 1];
+
+  return (
+    <div
+      className="rounded-2xl border p-6"
+      style={{ borderColor: BORDER, background: SURFACE }}
+    >
+      <div className="mb-5 flex items-center justify-between">
+        <span
+          className="flex items-center gap-1.5 text-[13px] font-semibold"
+          style={{ color: TEXT_PRIMARY }}
+        >
+          <Activity size={14} style={{ color: TEXT_TERTIARY }} />
+          Container health · POST /checkout
+        </span>
+        <span
+          className="flex items-center gap-1.5 text-[11px] font-semibold"
+          style={{ color: ACCENT_TEXT }}
+        >
+          <span
+            className="h-1.5 w-1.5 animate-pulse rounded-full"
+            style={{ background: ACCENT }}
+          />
+          Live
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
+        <LiveStat
+          icon={Cpu}
+          label="CPU"
+          value={latest ? `${latest.cpu.toFixed(1)}%` : "—"}
+          alert={!!latest && latest.cpu > 80}
+        />
+        <LiveStat
+          icon={MemoryStick}
+          label="Memory"
+          value={latest ? `${latest.memory.toFixed(0)} MB` : "—"}
+        />
+        <LiveStat
+          icon={Activity}
+          label="Latency p50"
+          value={latest ? `${latest.p50.toFixed(0)} ms` : "—"}
+        />
+        <LiveStat
+          icon={Activity}
+          label="Latency p95"
+          value={latest ? `${latest.p95.toFixed(0)} ms` : "—"}
+          alert={!!latest && latest.p95 > 260}
+        />
+      </div>
+
+      <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-2">
+        <div>
+          <div
+            className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em]"
+            style={{ color: TEXT_QUIET }}
+          >
+            CPU %
+          </div>
+          <ResponsiveContainer width="100%" height={140}>
+            <LineChart data={history}>
+              <CartesianGrid stroke={BORDER} vertical={false} />
+              <XAxis dataKey="t" hide />
+              <YAxis
+                stroke={TEXT_QUIET}
+                fontSize={10}
+                width={28}
+                domain={[0, 100]}
+              />
+              <Tooltip
+                contentStyle={{
+                  background: BG,
+                  border: `1px solid ${BORDER_STRONG}`,
+                  borderRadius: 8,
+                  fontSize: 11.5,
+                }}
+                labelFormatter={() => ""}
+                formatter={(v: number) => [`${v.toFixed(1)}%`, "CPU"]}
+              />
+              <Line
+                type="monotone"
+                dataKey="cpu"
+                stroke={ACCENT_HOVER}
+                dot={false}
+                strokeWidth={2}
+                isAnimationActive={false}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+        <div>
+          <div
+            className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em]"
+            style={{ color: TEXT_QUIET }}
+          >
+            API latency (ms)
+          </div>
+          <ResponsiveContainer width="100%" height={140}>
+            <LineChart data={history}>
+              <CartesianGrid stroke={BORDER} vertical={false} />
+              <XAxis dataKey="t" hide />
+              <YAxis stroke={TEXT_QUIET} fontSize={10} width={28} />
+              <Tooltip
+                contentStyle={{
+                  background: BG,
+                  border: `1px solid ${BORDER_STRONG}`,
+                  borderRadius: 8,
+                  fontSize: 11.5,
+                }}
+                labelFormatter={() => ""}
+              />
+              <Line
+                type="monotone"
+                dataKey="p50"
+                stroke={TEXT_TERTIARY}
+                dot={false}
+                strokeWidth={1.5}
+                isAnimationActive={false}
+                name="p50"
+              />
+              <Line
+                type="monotone"
+                dataKey="p95"
+                stroke={ACCENT_HOVER}
+                dot={false}
+                strokeWidth={2}
+                isAnimationActive={false}
+                name="p95"
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const STAGES = [
   {
-    tag: "1.0  Connect",
-    title: "Connect your stack in one click",
-    body: "Point Axiom AI at your GitHub repository and your SigNoz instance. It automatically discovers every service, API, database, queue, and cache in your backend — no manual instrumentation.",
+    tag: "1.0  Diagnose",
+    title: "Here's what's wrong. Nothing else.",
+    body: "No fix, no diff, no code yet. Axiom reads live traces, logs, and metrics from SigNoz and hands back a plain-English root cause missing index, N+1 queries, a cold cache exactly like a senior engineer would before touching anything.",
   },
   {
-    tag: "2.0  Diagnose",
-    title: "Stop guessing at bottlenecks",
-    body: "Axiom AI reads live traces, logs, and metrics, then explains the root cause in plain engineering language — missing indexes, N+1 queries, sequential calls, cold caches — ranked by impact.",
+    tag: "2.0  Propose",
+    title: "One bug, several fixes",
+    body: "There is rarely only one way to solve an N+1 query. Axiom proposes multiple independent strategies, each with an estimated latency and resource improvement, before a single line ships.",
   },
   {
-    tag: "3.0  Generate",
-    title: "Multiple strategies, not one guess",
-    body: "Instead of a single suggested fix, Axiom AI proposes several independent optimization strategies, each with an estimated latency and resource improvement before a single line ships.",
-  },
-  {
-    tag: "4.0  Prove",
-    title: "Benchmark before you believe it",
-    body: "Every strategy is deployed to an isolated Performance Lab and load-tested. SigNoz measures latency, CPU, memory, DB queries, and error rate for each — live, side by side.",
+    tag: "3.0  Arena",
+    title: "Three isolated environments. One fair fight.",
+    body: "Every candidate strategy is deployed to its own sandbox and hit with the exact same workload, back to back so the comparison that follows is never apples to oranges.",
   },
 ];
 
@@ -56,19 +674,6 @@ const BENCHMARK_ROWS = [
   { metric: "Error Rate", original: "8%", a: "2%", b: "0.2%", c: "0.6%" },
 ];
 
-const STEPS = [
-  "Connect a backend",
-  "Axiom AI discovers every API automatically",
-  "Select an endpoint — e.g. POST /checkout",
-  "Live traces, metrics, and logs stream in",
-  "AI diagnoses: N+1 query, missing index",
-  "Three optimization strategies are generated",
-  "Each strategy runs a real load test",
-  "SigNoz updates the benchmark live",
-  "Winning strategy: p99 latency 2.5s → 620ms",
-  "Axiom AI opens the GitHub PR",
-];
-
 export default function Landing() {
   const [scrolled, setScrolled] = useState(false);
   const navigate = useNavigate();
@@ -81,206 +686,217 @@ export default function Landing() {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
-  // If someone lands on "/" already signed in (bookmark, back button, etc),
-  // send them straight to the workspace — the landing page never shows
-  // logged-in state.
   useEffect(() => {
-    if (status === "idle") {
-      dispatch(checkSession());
-    }
+    if (status === "idle") dispatch(checkSession());
   }, [status, dispatch]);
 
   useEffect(() => {
-    if (status === "authenticated") {
-      navigate("/workspace", { replace: true });
-    }
+    if (status === "authenticated") navigate("/workspace", { replace: true });
   }, [status, navigate]);
 
   return (
     <div
-      className="min-h-screen bg-[#08090a] text-[#d0d6e0] antialiased"
-      style={{
-        fontFamily:
-          "'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
-        fontFeatureSettings: '"cv01" on, "ss03" on, "zero" on',
-      }}
+      className="min-h-screen antialiased"
+      style={{ background: BG, color: TEXT_SECONDARY, fontFamily: SANS }}
     >
       {/* ---------- NAV ---------- */}
       <header
-        className={`fixed top-0 left-0 right-0 z-50 transition-colors duration-300 ${
-          scrolled
-            ? "bg-[#08090a]/90 backdrop-blur-md border-b border-[#23252a]"
-            : "bg-transparent"
-        }`}
+        className="fixed top-0 left-0 right-0 z-50 transition-colors duration-300"
+        style={{
+          background: scrolled ? `${BG}E6` : "transparent",
+          borderBottom: scrolled
+            ? `1px solid ${BORDER}`
+            : "1px solid transparent",
+          backdropFilter: scrolled ? "blur(10px)" : "none",
+        }}
       >
         <div className="mx-auto flex max-w-[1200px] items-center justify-between px-6 py-4">
           <div className="flex items-center gap-2">
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-              <path
-                d="M10 0L20 10L10 20L0 10L10 0Z"
-                stroke="#ffffff"
-                strokeWidth="1.2"
-                fill="none"
-              />
+              <path d="M10 0L20 10L10 20L0 10L10 0Z" fill={ACCENT} />
             </svg>
-            <span className="text-[16px] font-[510] tracking-[-0.011em] text-white">
+            <span
+              className="text-[16px] font-semibold tracking-[-0.011em]"
+              style={{ color: TEXT_PRIMARY }}
+            >
               Axiom AI
             </span>
           </div>
-
           <nav className="hidden md:flex items-center gap-1">
             {NAV_LINKS.map((link) => (
               <a
                 key={link}
                 href="#"
-                className="rounded-md px-3 py-2 text-[13px] font-normal text-[#d0d6e0] transition-colors hover:text-white"
+                className="rounded-md px-3 py-2 text-[13px] font-medium transition-colors"
+                style={{ color: TEXT_SECONDARY }}
               >
                 {link}
               </a>
             ))}
           </nav>
-
           <ConnectGithubButton />
         </div>
       </header>
 
       {/* ---------- HERO ---------- */}
-      <section className="relative overflow-hidden px-6 pt-44 pb-24">
-        <div className="mx-auto max-w-[1200px]">
+      <section className="relative overflow-hidden px-6 pt-40 pb-24">
+        <div className="mx-auto grid max-w-[1200px] grid-cols-1 items-center gap-14 lg:grid-cols-2">
           <div className="flex flex-col items-start gap-6">
-            <span className="rounded-full border border-[#23252a] bg-white/[0.03] px-3 py-1 text-[12px] font-normal text-[#8a8f98]">
-              Now observing production backends
-            </span>
-
-            <h1 className="max-w-[820px] text-[56px] md:text-[64px] font-[510] leading-[1.0] tracking-[-0.022em] text-white">
-              Prove your backend
-              <br />
-              is fast. Before you ship.
+            <h1
+              className="max-w-[520px] text-[46px] md:text-[56px] font-semibold leading-[1.05] tracking-[-0.02em]"
+              style={{ color: TEXT_PRIMARY }}
+            >
+              Prove your backend is fast. Before you ship.
             </h1>
-
-            <p className="max-w-[540px] text-[16px] font-normal leading-[1.5] text-[#8a8f98]">
-              Axiom AI is an autonomous backend performance engineer. It reads
-              your SigNoz telemetry, diagnoses bottlenecks, generates multiple
-              optimization strategies, and benchmarks every one in an isolated
-              lab — before a single line hits production.
+            <p
+              className="max-w-[460px] text-[16px] leading-[1.55]"
+              style={{ color: TEXT_TERTIARY }}
+            >
+              Axiom AI diagnoses the bottleneck, proposes several independent
+              fixes, benchmarks every one in an isolated sandbox, and opens the
+              pull request for the one that actually wins with the numbers to
+              prove it.
             </p>
-
             <div className="mt-2 flex items-center gap-3">
               <ConnectGithubButton />
               <a
-                href="#"
-                className="rounded-md border border-[#23252a] px-4 py-[10px] text-[13px] font-normal text-[#d0d6e0] transition-colors hover:border-[#383b3f] hover:text-white"
+                href="#diff"
+                className="flex items-center gap-1.5 rounded-md border px-4 py-[10px] text-[13px] font-medium"
+                style={{ borderColor: BORDER_STRONG, color: TEXT_SECONDARY }}
               >
-                Watch the demo →
+                <GitPullRequest size={14} /> See the diff
               </a>
             </div>
           </div>
 
-          {/* product screenshot frame */}
-          <div className="relative mt-20 rounded-xl border border-[#23252a] bg-[#0f1011] p-6 shadow-[0_0_0_1px_#23252a_inset]">
-            <div className="mb-4 flex items-center gap-1.5">
-              <span className="h-2.5 w-2.5 rounded-full bg-[#383b3f]" />
-              <span className="h-2.5 w-2.5 rounded-full bg-[#383b3f]" />
-              <span className="h-2.5 w-2.5 rounded-full bg-[#383b3f]" />
-            </div>
-
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
-              {[
-                { label: "Services", value: "14" },
-                { label: "Healthy APIs", value: "32" },
-                { label: "Needs Optimization", value: "5" },
-                { label: "Critical", value: "2" },
-              ].map((s) => (
-                <div
-                  key={s.label}
-                  className="rounded-md bg-white/[0.02] p-4 shadow-[0_2px_4px_rgba(0,0,0,0.4)]"
-                >
-                  <div className="text-[24px] font-normal text-white tracking-[-0.012em]">
-                    {s.value}
-                  </div>
-                  <div className="mt-1 text-[12px] text-[#8a8f98]">
-                    {s.label}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="mt-4 rounded-md border border-[#23252a] bg-white/[0.015] p-4">
-              <div className="flex items-center justify-between">
-                <span
-                  className="text-[12px] text-[#62666d]"
-                  style={{
-                    fontFamily: "'Berkeley Mono', ui-monospace, monospace",
-                  }}
-                >
-                  POST /checkout
-                </span>
-                <span className="rounded-[4px] bg-[#eb5757]/10 px-[6px] py-0 text-[12px] text-[#eb5757]">
-                  Critical
-                </span>
-              </div>
-              <p className="mt-2 text-[13px] text-[#8a8f98]">
-                Root cause: missing database index · N+1 queries · Redis cache
-                not utilized
-              </p>
-            </div>
-          </div>
-
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-40 bg-gradient-to-b from-transparent to-[#d0d6e0]/[0.06]" />
+          <DiffViewer
+            fileName="src/routes/orders.ts"
+            unifiedDiff={WINNING_DIFF}
+          />
         </div>
       </section>
 
-      {/* ---------- FEATURE SECTIONS ---------- */}
-      <section className="px-6 py-24">
-        <div className="mx-auto flex max-w-[1200px] flex-col gap-24">
-          {FEATURES.map((f, i) => (
-            <div
-              key={f.title}
-              className={`grid grid-cols-1 items-center gap-10 md:grid-cols-2 ${
-                i % 2 === 1 ? "md:[&>*:first-child]:order-2" : ""
-              }`}
+      {/* ---------- LIVE TELEMETRY ---------- */}
+      <section className="px-6 pb-24">
+        <div className="mx-auto max-w-[1200px]">
+          <div className="mb-8 flex flex-col items-start gap-3">
+            <span
+              className="text-[12px]"
+              style={{ fontFamily: "monospace", color: TEXT_QUIET }}
             >
-              <div>
+              0.0 Observability
+            </span>
+            <h2
+              className="text-[32px] font-semibold leading-[1.1] tracking-[-0.02em]"
+              style={{ color: TEXT_PRIMARY }}
+            >
+              Watching the route while you read this.
+            </h2>
+            <p
+              className="max-w-[560px] text-[15.5px]"
+              style={{ color: TEXT_TERTIARY }}
+            >
+              CPU, memory, and p50/p95 latency for the endpoint above, streamed
+              straight from telemetry this is the same panel that sits inside
+              the workspace.
+            </p>
+          </div>
+          <LiveTelemetryDemo />
+        </div>
+      </section>
+
+      {/* ---------- STAGES ---------- */}
+      <section
+        id="how-it-works"
+        className="px-6 py-20"
+        style={{ background: SURFACE }}
+      >
+        <div className="mx-auto max-w-[1200px]">
+          <div className="grid grid-cols-1 gap-10 md:grid-cols-3">
+            {STAGES.map((stage) => (
+              <div key={stage.title}>
                 <span
-                  className="text-[12px] text-[#62666d]"
-                  style={{
-                    fontFamily: "'Berkeley Mono', ui-monospace, monospace",
-                  }}
+                  className="text-[12px]"
+                  style={{ fontFamily: "monospace", color: TEXT_QUIET }}
                 >
-                  {f.tag}
+                  {stage.tag}
                 </span>
-                <h3 className="mt-3 text-[32px] font-normal leading-[1.13] tracking-[-0.012em] text-white">
-                  {f.title}
+                <h3
+                  className="mt-2 text-[20px] font-semibold leading-[1.25]"
+                  style={{ color: TEXT_PRIMARY }}
+                >
+                  {stage.title}
                 </h3>
-                <p className="mt-4 max-w-[440px] text-[16px] leading-[1.5] text-[#8a8f98]">
-                  {f.body}
+                <p
+                  className="mt-3 text-[14.5px] leading-[1.6]"
+                  style={{ color: TEXT_TERTIARY }}
+                >
+                  {stage.body}
                 </p>
               </div>
+            ))}
+          </div>
+        </div>
+      </section>
 
-              <div className="rounded-xl border border-[#23252a] bg-[#0f1011] p-6">
-                <div className="flex flex-col gap-2.5">
-                  {STEPS.slice(i * 2, i * 2 + 3).map((step, idx) => (
-                    <div
-                      key={step}
-                      className="flex items-center gap-3 rounded-md bg-white/[0.02] px-3 py-2.5"
-                    >
-                      <span
-                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-[510]"
-                        style={{
-                          background:
-                            idx === 0 ? "#e4f222" : "rgba(255,255,255,0.06)",
-                          color: idx === 0 ? "#08090a" : "#8a8f98",
-                        }}
-                      >
-                        {i * 2 + idx + 1}
-                      </span>
-                      <span className="text-[13px] text-[#d0d6e0]">{step}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          ))}
+      {/* ---------- SCRIPT GENERATOR DEMO ---------- */}
+      <section className="px-6 py-24">
+        <div className="mx-auto max-w-[1200px]">
+          <div className="mb-10 flex flex-col items-start gap-3">
+            <span
+              className="text-[12px]"
+              style={{ fontFamily: "monospace", color: TEXT_QUIET }}
+            >
+              2.0 Load Generator
+            </span>
+            <h2
+              className="text-[38px] font-semibold leading-[1.1] tracking-[-0.02em]"
+              style={{ color: TEXT_PRIMARY }}
+            >
+              Describe it. Watch it write the load test.
+            </h2>
+            <p
+              className="max-w-[560px] text-[15.5px]"
+              style={{ color: TEXT_TERTIARY }}
+            >
+              Say what you want tested in plain
+              English and get back a runnable script wired to the route you're
+              benchmarking.
+            </p>
+          </div>
+          <ScriptDemo />
+        </div>
+      </section>
+
+      {/* ---------- DIFF SHOWCASE ---------- */}
+      <section id="diff" className="px-6 py-24" style={{ background: SURFACE }}>
+        <div className="mx-auto max-w-[1200px]">
+          <div className="mb-10 flex flex-col items-start gap-3">
+            <span
+              className="text-[12px]"
+              style={{ fontFamily: "monospace", color: TEXT_QUIET }}
+            >
+              4.0 Verdict
+            </span>
+            <h2
+              className="text-[38px] font-semibold leading-[1.1] tracking-[-0.02em]"
+              style={{ color: TEXT_PRIMARY }}
+            >
+              The fix, reviewed like a pull request.
+            </h2>
+            <p
+              className="max-w-[560px] text-[15.5px]"
+              style={{ color: TEXT_TERTIARY }}
+            >
+              Once a strategy wins the benchmark, Axiom opens the exact diff
+              against your repo nothing hidden behind an AI's opinion, just
+              the change and the numbers behind it.
+            </p>
+          </div>
+          <DiffViewer
+            fileName="src/routes/orders.ts"
+            unifiedDiff={WINNING_DIFF}
+          />
         </div>
       </section>
 
@@ -289,37 +905,60 @@ export default function Landing() {
         <div className="mx-auto max-w-[1200px]">
           <div className="mb-10 flex flex-col items-start gap-3">
             <span
-              className="text-[12px] text-[#62666d]"
-              style={{ fontFamily: "'Berkeley Mono', ui-monospace, monospace" }}
+              className="text-[12px]"
+              style={{ fontFamily: "monospace", color: TEXT_QUIET }}
             >
               5.0 Performance Lab
             </span>
-            <h2 className="text-[48px] font-[510] leading-[1.0] tracking-[-0.022em] text-white">
+            <h2
+              className="text-[38px] font-semibold leading-[1.1] tracking-[-0.02em]"
+              style={{ color: TEXT_PRIMARY }}
+            >
               Every strategy, measured.
             </h2>
-            <p className="max-w-[560px] text-[16px] text-[#8a8f98]">
+            <p
+              className="max-w-[560px] text-[15.5px]"
+              style={{ color: TEXT_TERTIARY }}
+            >
               No guessing which fix is best. Axiom AI runs real load tests
               against every candidate and reports the numbers.
             </p>
           </div>
-
-          <div className="overflow-hidden rounded-xl border border-[#23252a] bg-[#0f1011]">
+          <div
+            className="overflow-hidden rounded-2xl border"
+            style={{ borderColor: BORDER, background: BG }}
+          >
             <table className="w-full border-collapse text-left">
               <thead>
-                <tr className="border-b border-[#23252a]">
-                  <th className="px-6 py-4 text-[12px] font-normal text-[#62666d]">
+                <tr className="border-b" style={{ borderColor: BORDER }}>
+                  <th
+                    className="px-6 py-4 text-[12px] font-medium"
+                    style={{ color: TEXT_QUIET }}
+                  >
                     Metric
                   </th>
-                  <th className="px-6 py-4 text-[12px] font-normal text-[#62666d]">
+                  <th
+                    className="px-6 py-4 text-[12px] font-medium"
+                    style={{ color: TEXT_QUIET }}
+                  >
                     Original
                   </th>
-                  <th className="px-6 py-4 text-[12px] font-normal text-[#62666d]">
+                  <th
+                    className="px-6 py-4 text-[12px] font-medium"
+                    style={{ color: TEXT_QUIET }}
+                  >
                     Strategy A
                   </th>
-                  <th className="px-6 py-4 text-[12px] font-[510] text-[#e4f222]">
+                  <th
+                    className="px-6 py-4 text-[12px] font-semibold"
+                    style={{ color: ACCENT_TEXT }}
+                  >
                     Strategy B
                   </th>
-                  <th className="px-6 py-4 text-[12px] font-normal text-[#62666d]">
+                  <th
+                    className="px-6 py-4 text-[12px] font-medium"
+                    style={{ color: TEXT_QUIET }}
+                  >
                     Strategy C
                   </th>
                 </tr>
@@ -328,27 +967,43 @@ export default function Landing() {
                 {BENCHMARK_ROWS.map((row, idx) => (
                   <tr
                     key={row.metric}
-                    className={
-                      idx !== BENCHMARK_ROWS.length - 1
-                        ? "border-b border-[#161718]"
-                        : ""
-                    }
+                    style={{
+                      borderBottom:
+                        idx !== BENCHMARK_ROWS.length - 1
+                          ? `1px solid ${BORDER}`
+                          : undefined,
+                    }}
                   >
-                    <td className="px-6 py-4 text-[13px] text-[#d0d6e0]">
+                    <td
+                      className="px-6 py-4 text-[13px]"
+                      style={{ color: TEXT_PRIMARY }}
+                    >
                       {row.metric}
                     </td>
-                    <td className="px-6 py-4 text-[13px] text-[#62666d]">
+                    <td
+                      className="px-6 py-4 text-[13px]"
+                      style={{ color: TEXT_QUIET }}
+                    >
                       {row.original}
                     </td>
-                    <td className="px-6 py-4 text-[13px] text-[#8a8f98]">
+                    <td
+                      className="px-6 py-4 text-[13px]"
+                      style={{ color: TEXT_TERTIARY }}
+                    >
                       {row.a}
                     </td>
                     <td className="px-6 py-4">
-                      <span className="rounded-[4px] bg-[#27a644]/10 px-[6px] py-[2px] text-[13px] font-[510] text-[#27a644]">
+                      <span
+                        className="rounded-[4px] px-[6px] py-[2px] text-[13px] font-semibold"
+                        style={{ background: LIVE_SOFT, color: LIVE }}
+                      >
                         {row.b}
                       </span>
                     </td>
-                    <td className="px-6 py-4 text-[13px] text-[#8a8f98]">
+                    <td
+                      className="px-6 py-4 text-[13px]"
+                      style={{ color: TEXT_TERTIARY }}
+                    >
                       {row.c}
                     </td>
                   </tr>
@@ -356,74 +1011,44 @@ export default function Landing() {
               </tbody>
             </table>
           </div>
-
-          <div className="mt-6 rounded-xl border border-[#23252a] bg-white/[0.02] p-6">
-            <p className="text-[15px] leading-[1.6] text-[#8a8f98]">
-              <span className="text-white">Strategy B</span> won because it
-              eliminated N+1 queries, added a composite database index, and
-              parallelized inventory and payment requests — cutting database
-              round-trips by 86% and dropping p99 latency from 2.5s to 620ms.
-            </p>
-          </div>
-        </div>
-      </section>
-
-      {/* ---------- LOGOS / TRUST STRIP ---------- */}
-      <section className="border-y border-[#161718] px-6 py-16">
-        <div className="mx-auto flex max-w-[1200px] flex-col items-center gap-8">
-          <span className="text-[13px] text-[#62666d]">
-            Built for teams already running on SigNoz
-          </span>
-          <div className="flex flex-wrap items-center justify-center gap-x-14 gap-y-6 opacity-70">
-            {["Vercel", "Cursor", "Coinbase", "Ramp", "Boom", "Cash App"].map(
-              (name) => (
-                <span
-                  key={name}
-                  className="text-[15px] font-[510] tracking-[-0.011em] text-[#8a8f98]"
-                >
-                  {name}
-                </span>
-              ),
-            )}
-          </div>
         </div>
       </section>
 
       {/* ---------- FINAL CTA ---------- */}
       <section className="px-6 py-32">
         <div className="mx-auto flex max-w-[1200px] flex-col items-center gap-6 text-center">
-          <h2 className="max-w-[600px] text-[48px] font-[510] leading-[1.0] tracking-[-0.022em] text-white">
+          <h2
+            className="max-w-[600px] text-[40px] font-semibold leading-[1.1] tracking-[-0.02em]"
+            style={{ color: TEXT_PRIMARY }}
+          >
             Ship the strategy that actually works.
           </h2>
-          <p className="max-w-[420px] text-[16px] text-[#8a8f98]">
+          <p
+            className="max-w-[420px] text-[15.5px]"
+            style={{ color: TEXT_TERTIARY }}
+          >
             Connect your backend and let Axiom AI find, prove, and ship your
             next optimization.
           </p>
           <div className="mt-2 flex items-center gap-3">
             <ConnectGithubButton />
-            <a
-              href="#"
-              className="rounded-md border border-[#23252a] px-5 py-[10px] text-[13px] text-[#d0d6e0] transition-colors hover:border-[#383b3f] hover:text-white"
-            >
-              Talk to sales
-            </a>
           </div>
         </div>
       </section>
 
       {/* ---------- FOOTER ---------- */}
-      <footer className="border-t border-[#161718] px-6 py-12">
+      <footer className="border-t px-6 py-12" style={{ borderColor: BORDER }}>
         <div className="mx-auto flex max-w-[1200px] flex-col items-center justify-between gap-6 sm:flex-row">
           <div className="flex items-center gap-2">
             <svg width="16" height="16" viewBox="0 0 20 20" fill="none">
               <path
                 d="M10 0L20 10L10 20L0 10L10 0Z"
-                stroke="#8a8f98"
+                stroke={TEXT_TERTIARY}
                 strokeWidth="1.2"
                 fill="none"
               />
             </svg>
-            <span className="text-[13px] text-[#62666d]">
+            <span className="text-[13px]" style={{ color: TEXT_QUIET }}>
               © {new Date().getFullYear()} Axiom AI. All rights reserved.
             </span>
           </div>
@@ -432,7 +1057,8 @@ export default function Landing() {
               <a
                 key={l}
                 href="#"
-                className="text-[13px] text-[#62666d] transition-colors hover:text-[#d0d6e0]"
+                className="text-[13px]"
+                style={{ color: TEXT_QUIET }}
               >
                 {l}
               </a>

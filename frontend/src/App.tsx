@@ -5,7 +5,6 @@ import RepositoriesPage from "./pages/Repository.page";
 import RepoDetail from "./pages/RepoDetail";
 import ApiWorkspace from "./pages/ApiWorkSpace";
 import RequireAuth from "./routes/RequireAuth";
-import ObservabilityDashboard from "./pages/ObservabilityDashboard";
 import EndpointsPage from "./pages/EndpointsPage";
 
 export default function App() {
