@@ -137,6 +137,108 @@ export interface DbOperationBreakdown {
   totalDurationMs: number;
 }
 
+export interface OptimizationStrategy {
+  id: string;
+  title: string;
+  approach: string;
+  description: string;
+  estimatedImprovementPercent: { min: number; max: number };
+  diff: {
+    filePath: string;
+    originalCode: string;
+    newCode: string;
+    unifiedDiff: string;
+  };
+  confidence: "high" | "medium" | "low";
+}
+
+export interface StrategyGenerationResult {
+  rootCause: string;
+  severity: "critical" | "warning" | "info";
+  strategies: OptimizationStrategy[];
+}
+
+export interface ArenaCandidateResult {
+  strategyId: string;
+  title: string;
+  status: "completed" | "failed";
+  error?: string;
+  runResult?: LoadScriptResult;
+  telemetry?: RouteTelemetry | null;
+  cpuPercent?: number | null;
+  memoryMB?: number | null;
+  score?: number;
+}
+
+export interface ArenaResult {
+  arenaId: string;
+  candidates: ArenaCandidateResult[];
+  winnerStrategyId: string | null;
+}
+
+// api/repos.ts — ADD these types + function, and you can delete the old
+// `runOptimizationArena` (the blocking one) since ArenaLive replaces it.
+
+export type ArenaStage =
+  | "queued"
+  | "copying"
+  | "patching"
+  | "provisioning"
+  | "healthcheck"
+  | "benchmarking"
+  | "telemetry"
+  | "completed"
+  | "failed";
+
+export interface ArenaCandidateStatusEvent {
+  arenaId: string;
+  strategyId: string;
+  stage: ArenaStage;
+  message?: string;
+  error?: string;
+  runId?: string;
+}
+
+export interface ArenaMetricSampleEvent {
+  arenaId: string;
+  strategyId: string;
+  cpuPercent: number;
+  memoryMB: number;
+  timestamp: number;
+}
+
+export interface ArenaTelemetryEvent {
+  arenaId: string;
+  strategyId: string;
+  telemetry: RouteTelemetry;
+}
+
+export interface ArenaCandidateLogEvent {
+  arenaId: string;
+  strategyId: string;
+  index: number;
+  status: number;
+  ok: boolean;
+  method: string | null;
+  url: string | null;
+  durationMs: number | null;
+  responseBodySummary: string | null;
+  timestamp: number;
+}
+
+export async function generateStrategies(
+  repositoryId: string,
+  routeIndex: number,
+  runResult: LoadScriptResult,
+  telemetry: RouteTelemetry | null,
+): Promise<StrategyGenerationResult> {
+  const { data } = await apiClient.post<StrategyGenerationResult>(
+    `/repos/${repositoryId}/generate-strategies`,
+    { routeIndex, runResult, telemetry },
+  );
+  return data;
+}
+
 /** GET /repos — list the signed-in user's GitHub repositories */
 export async function listRepos(): Promise<GithubRepo[]> {
   const { data } = await apiClient.get<{ repos: GithubRepo[] }>("/repos");
@@ -178,7 +280,6 @@ export async function getRun(
   );
   return data;
 }
-
 
 export async function getEnvStatus(repositoryId: string): Promise<EnvStatus> {
   const res = await apiClient.get<EnvStatus>(`/repos/${repositoryId}/env`);
@@ -318,3 +419,38 @@ export async function applyFixAndRetest(
   return data;
 }
 
+export async function initArena(
+  repositoryId: string,
+  routeIndex: number,
+): Promise<{ arenaId: string }> {
+  const { data } = await apiClient.post<{ arenaId: string }>(
+    `/repos/${repositoryId}/init-arena`,
+    { routeIndex },
+  );
+  return data;
+}
+
+export async function runArenaCandidate(
+  repositoryId: string,
+  arenaId: string,
+  strategy: OptimizationStrategy,
+  script: string,
+  authToken?: string,
+): Promise<ArenaCandidateResult> {
+  const { data } = await apiClient.post<{ result: ArenaCandidateResult }>(
+    `/repos/${repositoryId}/run-arena-candidate`,
+    { arenaId, strategy, script, authToken },
+  );
+  return data.result;
+}
+
+export async function finalizeArena(
+  repositoryId: string,
+  arenaId: string,
+): Promise<ArenaResult> {
+  const { data } = await apiClient.post<ArenaResult>(
+    `/repos/${repositoryId}/finalize-arena`,
+    { arenaId },
+  );
+  return data;
+}

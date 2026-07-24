@@ -13,7 +13,6 @@ import {
 } from "recharts";
 import {
   Sparkles,
-  RefreshCw,
   Play,
   GitBranch,
   Server,
@@ -24,6 +23,14 @@ import {
   X,
   Loader2,
   KeyRound,
+  Terminal,
+  Code2,
+  BarChart3,
+  Wand2,
+  ChevronDown,
+  ChevronUp,
+  Info,
+  Workflow,
 } from "lucide-react";
 import type { AppDispatch, RootState } from "../store/store";
 import { fetchRepoDetail } from "../store/slices/reposSlice";
@@ -46,32 +53,38 @@ import {
   type PerformanceReport,
 } from "../api/repos";
 import PerformanceReportFull from "../components/PerformanceReportFull";
-// ---------------------------------------------------------------------------
-// Design tokens
-// ---------------------------------------------------------------------------
-const MONO = "'Berkeley Mono', ui-monospace, monospace";
-const SANS = "'Inter', ui-sans-serif, system-ui, sans-serif";
-
-const BG = "#0a0a0a";
-const SURFACE = "#111111";
-const BORDER = "#1e1e1e";
-const BORDER_STRONG = "#2e2e2e";
-const BORDER_HOVER = "#454545";
-const TEXT_PRIMARY = "#f5f5f5";
-const TEXT_SECONDARY = "#b3b3b3";
-const TEXT_TERTIARY = "#6e6e6e";
-const TEXT_QUIET = "#4a4a4a";
-
-const CONSOLE_WIDTH_NARROW = 320;
-const CONSOLE_WIDTH_WIDE = 440;
+import ExecutionConsole from "../components/ExecutionConsole";
+import SourceOverlay from "../components/SourceOverlay";
+import {
+  MONO,
+  SANS,
+  BG,
+  SURFACE,
+  SURFACE_RAISED,
+  BORDER,
+  BORDER_STRONG,
+  BORDER_HOVER,
+  TEXT_PRIMARY,
+  TEXT_SECONDARY,
+  TEXT_TERTIARY,
+  TEXT_QUIET,
+  ACCENT,
+  ACCENT_HOVER,
+  ACCENT_SOFT,
+  ACCENT_TEXT,
+  LIVE,
+  LIVE_SOFT,
+  ERROR,
+  ERROR_SOFT,
+  SIDEBAR_WIDTH,
+  CONTENT_MAX_WIDTH,
+  CONSOLE_HEIGHT_NARROW,
+  CONSOLE_HEIGHT_WIDE,
+} from "../theme";
 
 const TELEMETRY_POLL_MS = 2000;
 const TELEMETRY_POLL_DURATION_MS = 20_000;
 const MAX_CHART_POINTS = 30;
-
-// Height of the docked composer row (px + py). Content gets this much
-// bottom padding so nothing hides behind the sticky composer.
-const COMPOSER_HEIGHT = 76;
 
 const ROLE_META: Record<
   ConnectedFile["role"],
@@ -96,26 +109,29 @@ interface TelemetryPoint {
   p95: number;
 }
 
-// "results" -> split into "script" (generated code) and "report" (run
-// stats + live telemetry). Report tab only renders when there's a report.
-type TabKey = "overview" | "source" | "script" | "report";
+type StageKey = "script" | "run" | "analyze";
+type StageStatus = "pending" | "active" | "done";
 
 // ---------------------------------------------------------------------------
-// Small building blocks
+// Building blocks
 // ---------------------------------------------------------------------------
-function Eyebrow({
+
+function SectionLabel({
+  icon: Icon,
   children,
   action,
 }: {
+  icon?: typeof Info;
   children: React.ReactNode;
   action?: React.ReactNode;
 }) {
   return (
-    <div className="mb-3 flex items-center justify-between">
+    <div className="mb-3 flex items-center justify-between gap-3">
       <span
-        className="text-[11px] font-semibold uppercase tracking-[0.08em]"
+        className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.08em]"
         style={{ color: TEXT_TERTIARY }}
       >
+        {Icon && <Icon size={12} />}
         {children}
       </span>
       {action}
@@ -123,22 +139,70 @@ function Eyebrow({
   );
 }
 
-function CodeBlock({
-  code,
-  filePath,
-  startLine = 1,
-  highlightLine,
+// Generic card shell used for every panel in the playground. A single
+// consistent container — instead of ad hoc borders scattered per-section —
+// is most of what makes the page read as "one product" rather than a pile
+// of components.
+function Panel({
+  children,
+  accent = false,
+  className = "",
+  style,
 }: {
-  code: string;
-  filePath: string;
-  startLine?: number;
-  highlightLine?: number;
+  children: React.ReactNode;
+  accent?: boolean;
+  className?: string;
+  style?: React.CSSProperties;
 }) {
+  return (
+    <div
+      className={`rounded-2xl border ${className}`}
+      style={{
+        borderColor: accent ? ACCENT : BORDER,
+        background: BG,
+        boxShadow: accent
+          ? "0 1px 2px rgba(20,20,10,0.04), 0 12px 28px -18px rgba(245,196,0,0.35)"
+          : "0 1px 2px rgba(20,20,10,0.03)",
+        ...style,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function PanelHeader({
+  icon: Icon,
+  title,
+  action,
+}: {
+  icon?: typeof Info;
+  title: string;
+  action?: React.ReactNode;
+}) {
+  return (
+    <div
+      className="flex items-center justify-between gap-3 border-b px-5 py-3.5"
+      style={{ borderColor: BORDER }}
+    >
+      <span
+        className="flex items-center gap-2 text-[13px] font-semibold"
+        style={{ color: TEXT_PRIMARY }}
+      >
+        {Icon && <Icon size={14} style={{ color: TEXT_TERTIARY }} />}
+        {title}
+      </span>
+      {action}
+    </div>
+  );
+}
+
+function CodeBlock({ code, filePath }: { code: string; filePath: string }) {
   return (
     <Highlight
       code={code}
       language={languageFor(filePath)}
-      theme={themes.vsDark}
+      theme={themes.vsLight}
     >
       {({ className, tokens, getLineProps, getTokenProps }) => (
         <pre
@@ -151,44 +215,33 @@ function CodeBlock({
             fontSize: 13,
             lineHeight: 1.75,
             overflow: "auto",
-            height: "100%",
           }}
         >
-          {tokens.map((line, i) => {
-            const lineNumber = startLine + i;
-            const isTarget = highlightLine === lineNumber;
-            return (
-              <div
-                key={i}
-                {...getLineProps({ line })}
+          {tokens.map((line, i) => (
+            <div
+              key={i}
+              {...getLineProps({ line })}
+              style={{ display: "flex" }}
+            >
+              <span
                 style={{
-                  display: "flex",
-                  background: isTarget ? "#ffffff0d" : "transparent",
-                  borderLeft: isTarget
-                    ? "2px solid #ffffff"
-                    : "2px solid transparent",
+                  width: 40,
+                  flexShrink: 0,
+                  textAlign: "right",
+                  paddingRight: 16,
+                  color: TEXT_QUIET,
+                  userSelect: "none",
                 }}
               >
-                <span
-                  style={{
-                    width: 48,
-                    flexShrink: 0,
-                    textAlign: "right",
-                    paddingRight: 16,
-                    color: TEXT_QUIET,
-                    userSelect: "none",
-                  }}
-                >
-                  {lineNumber}
-                </span>
-                <span style={{ flex: 1, whiteSpace: "pre", paddingRight: 20 }}>
-                  {line.map((token, key) => (
-                    <span key={key} {...getTokenProps({ token })} />
-                  ))}
-                </span>
-              </div>
-            );
-          })}
+                {i + 1}
+              </span>
+              <span style={{ flex: 1, whiteSpace: "pre", paddingRight: 20 }}>
+                {line.map((token, key) => (
+                  <span key={key} {...getTokenProps({ token })} />
+                ))}
+              </span>
+            </div>
+          ))}
         </pre>
       )}
     </Highlight>
@@ -206,8 +259,8 @@ function StatBlock({
 }) {
   return (
     <div
-      className="rounded-lg border px-3.5 py-3 transition-colors"
-      style={{ borderColor: BORDER_STRONG, background: SURFACE }}
+      className="rounded-xl border px-3.5 py-3"
+      style={{ borderColor: BORDER, background: SURFACE }}
     >
       <div
         className="text-[10.5px] font-medium uppercase tracking-[0.06em]"
@@ -220,38 +273,28 @@ function StatBlock({
         style={{ color: TEXT_PRIMARY, fontFamily: MONO }}
       >
         {value}
-        {alert && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+        {alert && (
+          <span
+            className="h-1.5 w-1.5 rounded-full"
+            style={{ background: ERROR }}
+          />
+        )}
       </div>
     </div>
   );
 }
 
-function InvertChip({
+function ErrorChip({
   icon: Icon,
   children,
 }: {
-  icon: typeof Check;
-  children: React.ReactNode;
-}) {
-  return (
-    <span className="flex items-center gap-1.5 rounded-lg bg-white px-3.5 py-2 text-[12.5px] font-semibold text-black">
-      <Icon size={13} />
-      {children}
-    </span>
-  );
-}
-
-function OutlineChip({
-  icon: Icon,
-  children,
-}: {
-  icon: typeof Check;
+  icon: typeof X;
   children: React.ReactNode;
 }) {
   return (
     <span
-      className="flex items-center gap-1.5 rounded-lg border px-3.5 py-2 text-[12.5px] font-medium"
-      style={{ borderColor: BORDER_STRONG, color: TEXT_SECONDARY }}
+      className="flex items-center gap-1.5 rounded-lg border px-3.5 py-2 text-[12.5px] font-semibold"
+      style={{ borderColor: ERROR, color: ERROR, background: ERROR_SOFT }}
     >
       <Icon size={13} />
       {children}
@@ -259,31 +302,65 @@ function OutlineChip({
   );
 }
 
-function TabButton({
-  active,
-  onClick,
-  children,
-  dot,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-  dot?: boolean;
-}) {
+// Horizontal progress — script, run, analyze read left to right the same
+// way the user actually moves through the page.
+function Stepper({ statuses }: { statuses: Record<StageKey, StageStatus> }) {
+  const steps: { key: StageKey; label: string }[] = [
+    { key: "script", label: "Script" },
+    { key: "run", label: "Run" },
+    { key: "analyze", label: "Analyze" },
+  ];
   return (
-    <button
-      onClick={onClick}
-      className="relative flex items-center gap-1.5 border-b-2 px-1 pb-3 text-[13px] font-medium transition-colors"
-      style={{
-        borderColor: active ? "#ffffff" : "transparent",
-        color: active ? TEXT_PRIMARY : TEXT_TERTIARY,
-      }}
-    >
-      {children}
-      {dot && !active && (
-        <span className="absolute -right-2 top-0 h-1.5 w-1.5 rounded-full bg-white" />
-      )}
-    </button>
+    <div className="flex items-center gap-2.5">
+      {steps.map((step, i) => {
+        const status = statuses[step.key];
+        return (
+          <div key={step.key} className="flex items-center gap-2.5">
+            <div className="flex items-center gap-1.5">
+              <span
+                className="flex h-5 w-5 items-center justify-center rounded-full text-[10.5px] font-bold"
+                style={{
+                  background:
+                    status === "done"
+                      ? TEXT_PRIMARY
+                      : status === "active"
+                        ? ACCENT
+                        : SURFACE_RAISED,
+                  color:
+                    status === "pending"
+                      ? TEXT_QUIET
+                      : status === "active"
+                        ? TEXT_PRIMARY
+                        : "#fff",
+                }}
+              >
+                {status === "active" ? (
+                  <Loader2 size={11} className="animate-spin" />
+                ) : status === "done" ? (
+                  <Check size={11} />
+                ) : (
+                  i + 1
+                )}
+              </span>
+              <span
+                className="text-[12px] font-semibold"
+                style={{
+                  color: status === "pending" ? TEXT_QUIET : TEXT_PRIMARY,
+                }}
+              >
+                {step.label}
+              </span>
+            </div>
+            {i < steps.length - 1 && (
+              <span
+                className="h-px w-8"
+                style={{ background: BORDER_STRONG }}
+              />
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -303,16 +380,15 @@ export default function ApiWorkspace() {
 
   const { entries, progress, reset } = useTrafficStream(repositoryId || null);
 
-  const [tab, setTab] = useState<TabKey>("overview");
-  const [reportUnseen, setReportUnseen] = useState(false);
-
   // --- endpoint context ---
   const [explanation, setExplanation] = useState<string | null>(null);
   const [explanationLoading, setExplanationLoading] = useState(false);
+  const [explanationExpanded, setExplanationExpanded] = useState(false);
   const [connected, setConnected] = useState<ConnectedFilesResult | null>(null);
   const [activeFile, setActiveFile] = useState<ConnectedFile | null>(null);
   const [authRequired, setAuthRequired] = useState(false);
   const [authToken, setAuthToken] = useState("");
+  const [sourceOpen, setSourceOpen] = useState(false);
 
   // --- live telemetry ---
   const [telemetry, setTelemetry] = useState<RouteTelemetry | null>(null);
@@ -327,6 +403,13 @@ export default function ApiWorkspace() {
   const [scriptRunning, setScriptRunning] = useState(false);
   const [scriptError, setScriptError] = useState<string | null>(null);
   const [loadResult, setLoadResult] = useState<LoadScriptResult | null>(null);
+  // Tracks whether a load test has EVER completed for this session — kept
+  // separate from `loadResult` itself. `loadResult` is intentionally set
+  // back to null at the start of every new run (handleRunScript) so the
+  // stats panel can show a "running…" state, but that null shouldn't tear
+  // down the whole Analysis & optimization panel just because a new run
+  // started.
+  const [hasEverRun, setHasEverRun] = useState(false);
   const [perfReport, setPerfReport] = useState<PerformanceReport | null>(null);
   const [perfLoading, setPerfLoading] = useState(false);
   const [perfError, setPerfError] = useState<string | null>(null);
@@ -340,18 +423,15 @@ export default function ApiWorkspace() {
   const [applyFixLoading, setApplyFixLoading] = useState(false);
   const [applyFixError, setApplyFixError] = useState<string | null>(null);
   const [fixApplied, setFixApplied] = useState(false);
-  // --- execution console visibility (only opens when a run starts) ---
+  void applyFixLoading;
+  void applyFixError;
+  void fixApplied;
+
+  // --- execution console (bottom drawer) ---
   const [consoleOpen, setConsoleOpen] = useState(false);
   const [consoleExpanded, setConsoleExpanded] = useState(false);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-  const reportAvailable = !!(
-    loadResult ||
-    telemetry ||
-    scriptRunning ||
-    pollRef.current
-  );
 
   useEffect(() => {
     if (repositoryId && !repo) dispatch(fetchRepoDetail(repositoryId));
@@ -382,14 +462,8 @@ export default function ApiWorkspace() {
 
   useEffect(() => {
     if (!loadResult || !telemetry) return;
-    if (analyzedRunRef.current === loadResult) return; // already analyzed this run
+    if (analyzedRunRef.current === loadResult) return;
 
-    // Wait for a telemetry tick whose window fully covers the completed
-    // run — the first tick after loadResult lands is often a partial
-    // window (SigNoz hasn't ingested the tail-end spans yet, or the
-    // window's `end` predates loadResult.windowEnd), which skews
-    // avg/cumulative DB numbers and can make sequential calls look like
-    // they "overlap" the request when they don't.
     const windowCoversRun = telemetry.window.end >= loadResult.windowEnd;
     if (!windowCoversRun) return;
 
@@ -408,17 +482,11 @@ export default function ApiWorkspace() {
       .finally(() => setPerfLoading(false));
   }, [loadResult, telemetry, repositoryId, routeIndex]);
 
-  // clear the "unseen report" dot once the user actually looks at the tab
-  useEffect(() => {
-    if (tab === "report") setReportUnseen(false);
-  }, [tab]);
-
-  // auto-grow the composer textarea (starts at one line, caps at ~4 lines)
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 96)}px`;
+    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
   }, [description]);
 
   const pollTelemetry = (start: number, end: number, serviceName: string) => {
@@ -482,12 +550,10 @@ export default function ApiWorkspace() {
       setScript(result.script);
       setAuthRequired(result.authRequired);
       setScriptEditing(false);
-      setTab("script");
     } catch (err) {
       setScriptError(
         err instanceof Error ? err.message : "Failed to generate script",
       );
-      setTab("script");
     } finally {
       setScriptLoading(false);
     }
@@ -498,12 +564,11 @@ export default function ApiWorkspace() {
     setScriptError(null);
     setScriptRunning(true);
     setLoadResult(null);
+    setHasEverRun(true);
     setTelemetry(null);
     setChartData([]);
     reset();
     setConsoleOpen(true);
-    setTab("report");
-    setReportUnseen(false);
     try {
       const result = await runLoadScript(
         repositoryId,
@@ -511,12 +576,10 @@ export default function ApiWorkspace() {
         authToken.trim() || undefined,
       );
       setLoadResult(result);
-      setReportUnseen(tab !== "report");
       const serviceName = repo.githubFullName.split("/")[1];
       pollTelemetry(result.windowStart, result.windowEnd, serviceName);
     } catch (err) {
       setScriptError(err instanceof Error ? err.message : "Load test failed");
-      setReportUnseen(tab !== "report");
     } finally {
       setScriptRunning(false);
     }
@@ -541,14 +604,13 @@ export default function ApiWorkspace() {
     }
   };
 
+  // Kept for the "apply the winning diff and retest" flow — not yet
+  // wired to a button in this pass (strategies each carry their own
+  // diff now; this will plug into "apply winner from leaderboard" next).
   const handleApplyFix = async () => {
     if (!repo || !script || !perfReport?.diff) return;
     setApplyFixLoading(true);
     setApplyFixError(null);
-
-    // Same treatment as a fresh run: clear the console and telemetry chart
-    // so the retest's output isn't mixed in with the baseline run's, and
-    // make sure the console panel is actually visible to show it live.
     reset();
     setConsoleOpen(true);
     setTelemetry(null);
@@ -557,7 +619,6 @@ export default function ApiWorkspace() {
       clearInterval(pollRef.current);
       pollRef.current = null;
     }
-
     try {
       const result = await applyFixAndRetest(
         repositoryId,
@@ -574,11 +635,6 @@ export default function ApiWorkspace() {
       }
       setComparisonResult(result.runResult);
       setFixApplied(true);
-
-      // Restart live polling against the NEW run's window, same as a
-      // normal run — a single one-shot telemetry snapshot (result.telemetry)
-      // undersells what actually happened, since the run already streamed
-      // per-request logs into the console via the socket while it executed.
       const serviceName = repo.githubFullName.split("/")[1];
       pollTelemetry(
         result.runResult.windowStart,
@@ -594,6 +650,7 @@ export default function ApiWorkspace() {
       setApplyFixLoading(false);
     }
   };
+  void handleApplyFix;
 
   const isBusy =
     progress?.status === "starting" || progress?.status === "running";
@@ -607,9 +664,15 @@ export default function ApiWorkspace() {
   }, [connected]);
   void filesByRole;
 
-  const consoleWidth = consoleExpanded
-    ? CONSOLE_WIDTH_WIDE
-    : CONSOLE_WIDTH_NARROW;
+  const consoleHeight = consoleExpanded
+    ? CONSOLE_HEIGHT_WIDE
+    : CONSOLE_HEIGHT_NARROW;
+
+  const stageStatuses: Record<StageKey, StageStatus> = {
+    script: scriptLoading ? "active" : script ? "done" : "pending",
+    run: scriptRunning ? "active" : loadResult ? "done" : "pending",
+    analyze: perfLoading ? "active" : perfReport ? "done" : "pending",
+  };
 
   if (!repo || !route) {
     return (
@@ -624,656 +687,706 @@ export default function ApiWorkspace() {
   }
 
   return (
-    // Root is a flex ROW: main column + console panel as real flex
-    // siblings. No marginRight hack — the console only ever takes the
-    // width it's actually given, and the main column just shrinks to
-    // fill whatever's left. h-[100dvh] instead of h-screen so mobile
-    // browser chrome doesn't clip it.
     <div
-      className="flex h-[100dvh] overflow-hidden"
+      className="flex h-[100dvh] flex-col overflow-hidden"
       style={{ fontFamily: SANS, background: BG }}
     >
       {/* ======================================================= */}
-      {/* Main column                                               */}
+      {/* Top bar — endpoint identity + status, full width, always  */}
+      {/* visible. Everything needed to orient in one row.          */}
       {/* ======================================================= */}
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        {/* --------------------------------------------------------- */}
-        {/* Header                                                     */}
-        {/* --------------------------------------------------------- */}
-        <header className="w-full shrink-0 px-8 pt-6">
-          <div className="flex flex-wrap items-center gap-3">
-            <span
-              className="ml-auto flex items-center gap-2 text-[12px]"
-              style={{ color: isLivePolling ? TEXT_PRIMARY : TEXT_QUIET }}
-            >
-              <Radio size={13} />
-              {isBusy ? "Sending traffic" : isLivePolling ? "Live" : "Idle"}
-            </span>
-          </div>
-
-          {/* --------------------------------------------------------- */}
-          {/* Tabs                                                       */}
-          {/* --------------------------------------------------------- */}
-          <div
-            className="flex items-center gap-6 border-b"
-            style={{ borderColor: BORDER }}
+      <header
+        className="flex shrink-0 items-center justify-between gap-4 border-b px-6 py-3.5 lg:px-9"
+        style={{ borderColor: BORDER, background: BG }}
+      >
+        <div className="flex min-w-0 items-center gap-3">
+          <span
+            className="rounded-md px-2 py-1 text-[11px] font-bold"
+            style={{
+              background: TEXT_PRIMARY,
+              color: "#fff",
+              fontFamily: MONO,
+            }}
           >
-            <TabButton
-              active={tab === "overview"}
-              onClick={() => setTab("overview")}
-            >
-              Overview
-            </TabButton>
-            <TabButton
-              active={tab === "source"}
-              onClick={() => setTab("source")}
-            >
-              Source &amp; Schema
-            </TabButton>
-            <TabButton
-              active={tab === "script"}
-              onClick={() => setTab("script")}
-            >
-              Script
-            </TabButton>
-            {reportAvailable && (
-              <TabButton
-                active={tab === "report"}
-                onClick={() => setTab("report")}
-                dot={reportUnseen}
-              >
-                Report
-              </TabButton>
-            )}
-          </div>
-        </header>
-
-        {/* --------------------------------------------------------- */}
-        {/* Scrollable content region — the only part of the page that */}
-        {/* scrolls; header, tabs, and composer stay fixed in place.   */}
-        {/* --------------------------------------------------------- */}
-        <div
-          className="min-h-0 flex-1 overflow-y-auto"
-          style={{ paddingBottom: COMPOSER_HEIGHT }}
-        >
-          <div className="flex w-full flex-col px-8 py-6">
-            {/* Overview tab */}
-            {tab === "overview" && (
-              <section className="grid grid-cols-1 gap-10 lg:grid-cols-[1fr_320px]">
-                <div>
-                  <Eyebrow
-                    action={
-                      <button
-                        onClick={() => {
-                          setExplanationLoading(true);
-                          getExplanation(repositoryId, route.file, route.line)
-                            .then(setExplanation)
-                            .finally(() => setExplanationLoading(false));
-                        }}
-                        className="flex items-center gap-1.5 text-[11.5px] font-medium transition-colors"
-                        style={{ color: TEXT_TERTIARY }}
-                      >
-                        <RefreshCw
-                          size={12}
-                          className={explanationLoading ? "animate-spin" : ""}
-                        />
-                        Regenerate
-                      </button>
-                    }
-                  >
-                    What this endpoint does
-                  </Eyebrow>
-                  {explanationLoading ? (
-                    <div className="space-y-2.5">
-                      <div className="h-3.5 w-[92%] animate-pulse rounded bg-[#161616]" />
-                      <div className="h-3.5 w-[76%] animate-pulse rounded bg-[#161616]" />
-                      <div className="h-3.5 w-[54%] animate-pulse rounded bg-[#161616]" />
-                    </div>
-                  ) : (
-                    <p
-                      className="text-[14px] leading-[1.75]"
-                      style={{ color: TEXT_SECONDARY }}
-                    >
-                      {explanation ?? "No explanation available yet."}
-                    </p>
-                  )}
-                </div>
-
-                {connected && connected.files.length > 0 && (
-                  <div>
-                    <Eyebrow>Call chain</Eyebrow>
-                    <nav className="flex flex-col gap-2">
-                      {connected.files.map((f) => {
-                        const meta = ROLE_META[f.role];
-                        const Icon = meta.icon;
-                        return (
-                          <button
-                            key={f.path}
-                            onClick={() => {
-                              setActiveFile(f);
-                              setTab("source");
-                            }}
-                            className="flex items-center gap-2 rounded-lg border px-3 py-2 text-[12.5px] transition-colors"
-                            style={{ borderColor: BORDER, color: TEXT_TERTIARY }}
-                          >
-                            <Icon size={13} className="shrink-0" />
-                            <span className="shrink-0">{meta.label}</span>
-                            <span
-                              className="truncate text-[11.5px] opacity-70"
-                              style={{ fontFamily: MONO }}
-                            >
-                              {f.path.split("/").pop()}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </nav>
-                  </div>
-                )}
-              </section>
-            )}
-
-            {/* Source & Schema tab */}
-            {tab === "source" && (
-              <section className="grid grid-cols-1 gap-8 lg:grid-cols-[1fr_280px]">
-                <div>
-                  {connected && connected.files.length > 0 && (
-                    <nav className="mb-4 flex flex-wrap items-center gap-2">
-                      {connected.files.map((f) => {
-                        const meta = ROLE_META[f.role];
-                        const Icon = meta.icon;
-                        const isActive = activeFile?.path === f.path;
-                        return (
-                          <button
-                            key={f.path}
-                            onClick={() => setActiveFile(f)}
-                            className={
-                              isActive
-                                ? "flex items-center gap-2 rounded-lg bg-white px-3 py-1.5 text-[12.5px] font-semibold text-black"
-                                : "flex items-center gap-2 rounded-lg border px-3 py-1.5 text-[12.5px] transition-colors"
-                            }
-                            style={
-                              isActive
-                                ? undefined
-                                : { borderColor: BORDER, color: TEXT_TERTIARY }
-                            }
-                          >
-                            <Icon size={13} />
-                            {meta.label}
-                            <span
-                              className="max-w-[150px] truncate text-[11.5px] opacity-70"
-                              style={{ fontFamily: MONO }}
-                            >
-                              {f.path.split("/").pop()}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </nav>
-                  )}
-
-                  <div
-                    className="overflow-hidden rounded-xl border"
-                    style={{ borderColor: BORDER, background: "#0d0d0d" }}
-                  >
-                    <div
-                      className="flex items-center justify-between border-b px-5 py-3"
-                      style={{ borderColor: BORDER }}
-                    >
-                      <div
-                        className="flex items-center gap-2.5 text-[13px]"
-                        style={{ color: TEXT_SECONDARY }}
-                      >
-                        {activeFile && (
-                          <>
-                            {(() => {
-                              const Icon = ROLE_META[activeFile.role].icon;
-                              return (
-                                <Icon
-                                  size={14}
-                                  style={{ color: TEXT_TERTIARY }}
-                                />
-                              );
-                            })()}
-                            <span style={{ fontFamily: MONO }}>
-                              {activeFile.path}
-                            </span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                    <div className="max-h-[55vh] overflow-auto px-3">
-                      {activeFile ? (
-                        <CodeBlock
-                          code={activeFile.content}
-                          filePath={activeFile.path}
-                          startLine={activeFile.startLine}
-                          highlightLine={activeFile.highlightLine}
-                        />
-                      ) : (
-                        <p
-                          className="px-4 py-8 text-[13px]"
-                          style={{ color: TEXT_QUIET }}
-                        >
-                          {connected === null
-                            ? "Loading source…"
-                            : "No source available for this file."}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                <div>
-                  <Eyebrow>Request body</Eyebrow>
-                  {connected?.requestBodyFields.length ? (
-                    <div
-                      className="overflow-hidden rounded-lg border"
-                      style={{ borderColor: BORDER }}
-                    >
-                      {connected.requestBodyFields.map((f, i) => (
-                        <div
-                          key={f}
-                          className="flex items-center justify-between px-3.5 py-2.5 text-[12.5px]"
-                          style={{
-                            borderTop: i > 0 ? `1px solid ${BORDER}` : undefined,
-                          }}
-                        >
-                          <span style={{ fontFamily: MONO, color: TEXT_PRIMARY }}>
-                            {f}
-                          </span>
-                          <span
-                            className="rounded border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.06em]"
-                            style={{
-                              borderColor: BORDER_STRONG,
-                              color: TEXT_TERTIARY,
-                            }}
-                          >
-                            field
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p
-                      className="text-[12.5px] leading-[1.7]"
-                      style={{ color: TEXT_QUIET }}
-                    >
-                      No{" "}
-                      <code style={{ fontFamily: MONO, color: TEXT_SECONDARY }}>
-                        req.body
-                      </code>{" "}
-                      usage found — this handler likely doesn't read a request
-                      body (e.g. a GET/list route).
-                    </p>
-                  )}
-                </div>
-              </section>
-            )}
-
-            {/* Script tab — the generated k6 code. Full width, fills the */}
-            {/* available height instead of being capped/split in half.   */}
-            {tab === "script" && (
-              <section className="flex flex-1 flex-col">
-                {!script && !scriptError && (
-                  <p className="text-[13px]" style={{ color: TEXT_QUIET }}>
-                    Nothing here yet — describe a scenario below and hit Generate.
-                  </p>
-                )}
-
-                {scriptError && !script && (
-                  <div className="mb-6">
-                    <InvertChip icon={X}>{scriptError}</InvertChip>
-                  </div>
-                )}
-
-                {script && (
-                  <div
-                    className="flex min-h-[60vh] flex-1 flex-col overflow-hidden rounded-xl border text-left"
-                    style={{ borderColor: BORDER, background: "#0d0d0d" }}
-                  >
-                    <div
-                      className="flex shrink-0 items-center justify-between border-b px-3.5 py-2.5"
-                      style={{ borderColor: BORDER }}
-                    >
-                      <span
-                        className="text-[11px] font-semibold uppercase tracking-[0.06em]"
-                        style={{ color: TEXT_TERTIARY }}
-                      >
-                        Generated test · k6
-                      </span>
-                      <button
-                        onClick={() => setScriptEditing((e) => !e)}
-                        className="rounded-md px-1.5 py-0.5 text-[11.5px] font-medium transition-colors"
-                        style={{ color: TEXT_SECONDARY }}
-                      >
-                        {scriptEditing ? "Done" : "Edit"}
-                      </button>
-                    </div>
-                    {scriptEditing ? (
-                      <textarea
-                        value={script}
-                        onChange={(e) => setScript(e.target.value)}
-                        spellCheck={false}
-                        className="w-full flex-1 resize-none bg-transparent px-3.5 py-3 text-[12.5px] leading-[1.7] outline-none"
-                        style={{ fontFamily: MONO, color: TEXT_SECONDARY }}
-                      />
-                    ) : (
-                      <div className="flex-1 overflow-auto px-2.5">
-                        <CodeBlock code={script} filePath="script.js" />
-                      </div>
-                    )}
-                  </div>
-                )}
-              </section>
-            )}
-
-            {/* Report tab — run stats + live telemetry. Only mounted when */}
-            {/* there's actually a report to show (see reportAvailable).   */}
-            {tab === "report" && reportAvailable && (
-              <section>
-                {scriptError && (
-                  <div className="mb-6">
-                    <InvertChip icon={X}>{scriptError}</InvertChip>
-                  </div>
-                )}
-
-                {progress && progress.status !== "done" && (
-                  <p
-                    className="mb-3 text-[11.5px]"
-                    style={{ color: TEXT_TERTIARY }}
-                  >
-                    {progress.status === "starting"
-                      ? "Starting k6…"
-                      : `${progress.sent} requests sent so far…`}
-                  </p>
-                )}
-
-                {loadResult && (
-                  <div className="mb-8">
-                    <Eyebrow>Run results</Eyebrow>
-                    <div className="grid grid-cols-3 gap-2.5">
-                      <StatBlock label="Total" value={loadResult.requestsSent} />
-                      <StatBlock
-                        label="Errors"
-                        value={`${(loadResult.errorRate * 100).toFixed(1)}%`}
-                        alert={loadResult.errorRate > 0.01}
-                      />
-                      <StatBlock
-                        label="Avg"
-                        value={`${Math.round(loadResult.avgDurationMs)}ms`}
-                      />
-                      <StatBlock
-                        label="p95"
-                        value={
-                          loadResult.p95DurationMs !== null
-                            ? `${Math.round(loadResult.p95DurationMs)}ms`
-                            : "—"
-                        }
-                      />
-                      <StatBlock
-                        label="p99"
-                        value={
-                          loadResult.p99DurationMs !== null
-                            ? `${Math.round(loadResult.p99DurationMs)}ms`
-                            : "—"
-                        }
-                      />
-                      <StatBlock
-                        label="Req/sec"
-                        value={
-                          loadResult.requestsPerSecond !== null
-                            ? loadResult.requestsPerSecond.toFixed(1)
-                            : "—"
-                        }
-                      />
-                    </div>
-                    {loadResult.thresholdsPassed !== null && (
-                      <div className="mt-3">
-                        {loadResult.thresholdsPassed ? (
-                          <OutlineChip icon={Check}>
-                            All thresholds passed
-                          </OutlineChip>
-                        ) : (
-                          <InvertChip icon={X}>
-                            One or more thresholds failed
-                          </InvertChip>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {(telemetry || isLivePolling) && (
-                  <div>
-                    <Eyebrow
-                      action={
-                        isLivePolling ? (
-                          <span
-                            className="flex items-center gap-1.5 text-[11.5px] font-semibold"
-                            style={{ color: TEXT_PRIMARY }}
-                          >
-                            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-white" />
-                            Live
-                          </span>
-                        ) : undefined
-                      }
-                    >
-                      Live telemetry
-                    </Eyebrow>
-
-                    {telemetry ? (
-                      <>
-                        <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
-                          <StatBlock
-                            label="Requests"
-                            value={telemetry.requestCount}
-                          />
-                          <StatBlock
-                            label="Error rate"
-                            value={`${telemetry.errorRatePercent}%`}
-                            alert={telemetry.errorRatePercent > 2}
-                          />
-                          <StatBlock
-                            label="p50"
-                            value={`${telemetry.latencyMs.p50} ms`}
-                          />
-                          <StatBlock
-                            label="p95"
-                            value={`${telemetry.latencyMs.p95} ms`}
-                          />
-                        </div>
-                        {chartData.length > 1 && (
-                          <div className="mt-4">
-                            <ResponsiveContainer width="100%" height={200}>
-                              <LineChart data={chartData}>
-                                <CartesianGrid stroke={BORDER} vertical={false} />
-                                <XAxis
-                                  dataKey="time"
-                                  stroke={TEXT_QUIET}
-                                  fontSize={10}
-                                />
-                                <YAxis stroke={TEXT_QUIET} fontSize={10} />
-                                <Tooltip
-                                  contentStyle={{
-                                    background: SURFACE,
-                                    border: `1px solid ${BORDER_STRONG}`,
-                                    borderRadius: 8,
-                                    fontSize: 11.5,
-                                  }}
-                                  labelStyle={{ color: TEXT_PRIMARY }}
-                                />
-                                <Line
-                                  type="monotone"
-                                  dataKey="p50"
-                                  stroke={TEXT_TERTIARY}
-                                  dot={false}
-                                  strokeWidth={1.5}
-                                />
-                                <Line
-                                  type="monotone"
-                                  dataKey="p95"
-                                  stroke="#ffffff"
-                                  dot={false}
-                                  strokeWidth={1.75}
-                                />
-                              </LineChart>
-                            </ResponsiveContainer>
-                          </div>
-                        )}
-                        {telemetry.requestCount === 0 && (
-                          <p
-                            className="mt-4 rounded-lg border px-3 py-2 text-[11.5px] font-medium"
-                            style={{
-                              borderColor: BORDER_STRONG,
-                              color: TEXT_SECONDARY,
-                            }}
-                          >
-                            No spans matched yet — still polling.
-                          </p>
-                        )}
-                      </>
-                    ) : (
-                      <p className="text-[13px]" style={{ color: TEXT_QUIET }}>
-                        Run traffic to see live numbers here.
-                      </p>
-                    )}
-                  </div>
-                )}
-                <PerformanceReportFull
-                  method={route.method}
-                  routePath={route.routePath}
-                  loadResult={loadResult}
-                  scriptRunning={scriptRunning}
-                  scriptError={scriptError}
-                  report={perfReport}
-                  perfLoading={perfLoading}
-                  perfError={perfError}
-                  telemetry={telemetry}
-                  baseline={baselineResult}
-                  comparison={comparisonResult}
-                  comparisonLoading={comparisonLoading}
-                  onRunAgain={handleRunAgain}
-                  onApplyFix={handleApplyFix}
-                  applyFixLoading={applyFixLoading}
-                  applyFixError={applyFixError}
-                  fixApplied={fixApplied}
-                />
-              </section>
-            )}
-          </div>
+            {route.method}
+          </span>
+          <h1
+            className="truncate text-[14.5px] font-semibold"
+            style={{ color: TEXT_PRIMARY, fontFamily: MONO }}
+          >
+            {route.routePath}
+          </h1>
+          <span
+            className="hidden items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold sm:flex"
+            style={{
+              borderColor: isBusy || isLivePolling ? ACCENT : BORDER_STRONG,
+              background: isBusy || isLivePolling ? ACCENT_SOFT : "transparent",
+              color: isBusy || isLivePolling ? ACCENT_TEXT : TEXT_TERTIARY,
+            }}
+          >
+            <Radio size={11} />
+            {isBusy ? "Sending traffic" : isLivePolling ? "Live" : "Idle"}
+          </span>
         </div>
 
-        {/* --------------------------------------------------------- */}
-        {/* Composer — sticky to the bottom of the viewport so it's    */}
-        {/* always visible without scrolling, regardless of content    */}
-        {/* height above it.                                            */}
-        {/* --------------------------------------------------------- */}
-        <div
-          className="sticky bottom-0 z-10 shrink-0 border-t"
-          style={{ borderColor: BORDER, background: BG }}
-        >
-          <div className="w-full px-8 py-3">
-            <div
-              className="flex w-full items-end gap-2 rounded-xl border px-3 py-2"
-              style={{ borderColor: BORDER_STRONG, background: SURFACE }}
-            >
-              <textarea
-                ref={textareaRef}
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="Simulate 100 concurrent users checking out with random products for 30 seconds."
-                rows={1}
-                disabled={scriptLoading}
-                className="min-h-[22px] flex-1 resize-none bg-transparent py-1 text-[13px] leading-[1.5] outline-none"
-                style={{ color: TEXT_PRIMARY, fontFamily: SANS }}
-              />
-
-              {authRequired && (
-                <div
-                  className="flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1.5"
-                  style={{ borderColor: BORDER_STRONG }}
-                >
-                  <KeyRound
-                    size={12}
-                    className="shrink-0"
-                    style={{ color: TEXT_TERTIARY }}
-                  />
-                  <input
-                    type="password"
-                    value={authToken}
-                    onChange={(e) => setAuthToken(e.target.value)}
-                    placeholder="Bearer token"
-                    className="w-[130px] bg-transparent text-[11.5px] outline-none"
-                    style={{ fontFamily: MONO, color: TEXT_PRIMARY }}
-                  />
-                </div>
-              )}
-
-              <button
-                onClick={handleGenerateScript}
-                disabled={scriptLoading || !description.trim()}
-                className="flex shrink-0 items-center justify-center gap-1.5 rounded-lg border px-3 py-1.5 text-[12px] font-semibold transition-colors disabled:opacity-30"
-                style={{ borderColor: BORDER_STRONG, color: TEXT_SECONDARY }}
-              >
-                {scriptLoading ? (
-                  <>
-                    <Loader2 size={12} className="animate-spin" />
-                    Generating
-                  </>
-                ) : (
-                  <>
-                    <Sparkles size={12} />
-                    Generate
-                  </>
-                )}
-              </button>
-              <button
-                onClick={handleRunScript}
-                disabled={scriptRunning || !script}
-                className="flex shrink-0 items-center justify-center gap-1.5 rounded-lg bg-white px-3 py-1.5 text-[12px] font-bold text-black transition-colors hover:bg-[#e5e5e5] disabled:opacity-30"
-              >
-                {scriptRunning ? (
-                  <>
-                    <Loader2 size={12} className="animate-spin" />
-                    Running
-                  </>
-                ) : (
-                  <>
-                    <Play size={12} />
-                    Run
-                  </>
-                )}
-              </button>
-            </div>
+        <div className="flex shrink-0 items-center gap-4">
+          <div className="hidden md:block">
+            <Stepper statuses={stageStatuses} />
           </div>
+          <span
+            className="hidden h-5 w-px md:block"
+            style={{ background: BORDER_STRONG }}
+          />
+          <button
+            onClick={() => setConsoleOpen((v) => !v)}
+            className="flex items-center gap-2 rounded-lg border px-3 py-2 text-[12.5px] font-medium transition-colors"
+            style={{
+              borderColor: consoleOpen ? TEXT_PRIMARY : BORDER_STRONG,
+              color: consoleOpen ? TEXT_PRIMARY : TEXT_TERTIARY,
+              background: consoleOpen ? SURFACE_RAISED : "transparent",
+            }}
+          >
+            <Terminal size={13} />
+            <span className="hidden sm:inline">Console</span>
+            {entries.length > 0 && (
+              <span
+                className="rounded-full px-1.5 py-0.5 text-[10px] font-bold"
+                style={{ background: ACCENT, color: ACCENT_TEXT }}
+              >
+                {entries.length}
+              </span>
+            )}
+          </button>
         </div>
-      </div>
+      </header>
 
-      {/* ======================================================= */}
-      {/* Console panel — a real flex sibling of the main column,   */}
-      {/* not an overlay pushed off with margin. Only takes the     */}
-      {/* width it's given, and only exists in the DOM when open.   */}
-      {/* ======================================================= */}
-      {/* {consoleOpen && (
-        <div
-          className="flex shrink-0 flex-col overflow-hidden border-l"
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {/* ======================================================= */}
+        {/* Context rail — compact reference cards instead of loose   */}
+        {/* floating text. Each section is visually contained so the  */}
+        {/* rail reads as a panel, not a leftover margin.              */}
+        {/* ======================================================= */}
+        <aside
+          className="hidden shrink-0 flex-col gap-5 overflow-y-auto border-r px-4 py-5 lg:flex"
           style={{
-            width: consoleWidth,
+            width: SIDEBAR_WIDTH,
             borderColor: BORDER,
-            transition: "width 160ms ease",
+            background: SURFACE,
           }}
         >
-          <ExecutionConsole
-            entries={entries}
-            progress={progress}
-            expanded={consoleExpanded}
-            onToggleExpand={() => setConsoleExpanded((v) => !v)}
-            onClear={reset}
-            onClose={() => setConsoleOpen(false)}
-          />
-        </div>
-      )} */}
+          <div
+            className="rounded-xl border px-4 py-3.5"
+            style={{ borderColor: BORDER, background: BG }}
+          >
+            <SectionLabel icon={Info}>What this does</SectionLabel>
+            {explanationLoading ? (
+              <div className="space-y-2">
+                <div
+                  className="h-2.5 w-[92%] animate-pulse rounded"
+                  style={{ background: SURFACE_RAISED }}
+                />
+                <div
+                  className="h-2.5 w-[76%] animate-pulse rounded"
+                  style={{ background: SURFACE_RAISED }}
+                />
+                <div
+                  className="h-2.5 w-[54%] animate-pulse rounded"
+                  style={{ background: SURFACE_RAISED }}
+                />
+              </div>
+            ) : (
+              <>
+                <p
+                  className={`text-[12.5px] leading-[1.6] ${
+                    explanationExpanded ? "" : "line-clamp-5"
+                  }`}
+                  style={{ color: TEXT_SECONDARY }}
+                >
+                  {explanation ?? "No explanation available yet."}
+                </p>
+                {explanation && explanation.length > 220 && (
+                  <button
+                    onClick={() => setExplanationExpanded((v) => !v)}
+                    className="mt-2 text-[11.5px] font-semibold"
+                    style={{ color: ACCENT_TEXT }}
+                  >
+                    {explanationExpanded ? "Show less" : "Read more"}
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+
+          {connected && connected.files.length > 0 && (
+            <div
+              className="rounded-xl border px-4 py-3.5"
+              style={{ borderColor: BORDER, background: BG }}
+            >
+              <SectionLabel icon={Workflow}>Call chain</SectionLabel>
+              <nav className="flex flex-col gap-1.5">
+                {connected.files.map((f, i) => {
+                  const meta = ROLE_META[f.role];
+                  const Icon = meta.icon;
+                  return (
+                    <button
+                      key={f.path}
+                      onClick={() => {
+                        setActiveFile(f);
+                        setSourceOpen(true);
+                      }}
+                      className="group flex items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[12.5px] transition-colors"
+                      style={{ color: TEXT_SECONDARY }}
+                      onMouseEnter={(e) =>
+                        (e.currentTarget.style.background = SURFACE_RAISED)
+                      }
+                      onMouseLeave={(e) =>
+                        (e.currentTarget.style.background = "transparent")
+                      }
+                    >
+                      <span
+                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[10px] font-bold"
+                        style={{
+                          background: SURFACE_RAISED,
+                          color: TEXT_QUIET,
+                        }}
+                      >
+                        {i + 1}
+                      </span>
+                      <Icon
+                        size={12.5}
+                        className="shrink-0"
+                        style={{ color: TEXT_TERTIARY }}
+                      />
+                      <span className="min-w-0 flex-1 truncate">
+                        <span
+                          className="mr-1.5 text-[10.5px] font-medium uppercase tracking-[0.04em]"
+                          style={{ color: TEXT_QUIET }}
+                        >
+                          {meta.label}
+                        </span>
+                        <span style={{ fontFamily: MONO, fontSize: 11.5 }}>
+                          {f.path.split("/").pop()}
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </nav>
+            </div>
+          )}
+        </aside>
+
+        {/* ======================================================= */}
+        {/* Workspace — full width up to a generous cap, composer as  */}
+        {/* the hero, then script + run/telemetry side by side so     */}
+        {/* cause and effect sit next to each other like gauges on an  */}
+        {/* instrument panel, with analysis running the full width     */}
+        {/* below since it can grow long.                              */}
+        {/* ======================================================= */}
+        <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+          <div className="min-h-0 flex-1 overflow-y-auto px-6 py-7 lg:px-10 xl:px-14">
+            <div
+              className="mx-auto flex w-full flex-col gap-6"
+              style={{ maxWidth: CONTENT_MAX_WIDTH }}
+            >
+              {/* Composer — the hero of the page. Full width, first    */}
+              {/* thing in the scroll, marked with the yellow signal    */}
+              {/* accent since it's the primary control here.           */}
+              <Panel accent className="px-6 py-5">
+                <div className="mb-3 flex items-center gap-2">
+                  <Wand2 size={15} style={{ color: ACCENT_TEXT }} />
+                  <span
+                    className="text-[13px] font-semibold"
+                    style={{ color: TEXT_PRIMARY }}
+                  >
+                    Describe a load-test scenario
+                  </span>
+                </div>
+                <textarea
+                  ref={textareaRef}
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="e.g. 100 concurrent users checking out with random products for 30 seconds."
+                  rows={2}
+                  disabled={scriptLoading}
+                  className="min-h-[52px] w-full resize-none bg-transparent py-1 text-[14.5px] leading-[1.55] outline-none"
+                  style={{ color: TEXT_PRIMARY, fontFamily: SANS }}
+                />
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                  {authRequired ? (
+                    <div
+                      className="flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5"
+                      style={{
+                        borderColor: BORDER_STRONG,
+                        background: SURFACE,
+                      }}
+                    >
+                      <KeyRound
+                        size={12}
+                        className="shrink-0"
+                        style={{ color: TEXT_TERTIARY }}
+                      />
+                      <input
+                        type="password"
+                        value={authToken}
+                        onChange={(e) => setAuthToken(e.target.value)}
+                        placeholder="Bearer token"
+                        className="w-[140px] bg-transparent text-[11.5px] outline-none"
+                        style={{ fontFamily: MONO, color: TEXT_PRIMARY }}
+                      />
+                    </div>
+                  ) : (
+                    <span />
+                  )}
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={handleGenerateScript}
+                      disabled={scriptLoading || !description.trim()}
+                      className="flex items-center justify-center gap-1.5 rounded-lg border px-3.5 py-2 text-[12.5px] font-semibold transition-colors disabled:opacity-30"
+                      style={{
+                        borderColor: BORDER_STRONG,
+                        color: TEXT_SECONDARY,
+                        background: "#fff",
+                      }}
+                    >
+                      {scriptLoading ? (
+                        <Loader2 size={13} className="animate-spin" />
+                      ) : (
+                        <Sparkles size={13} />
+                      )}
+                      {scriptLoading ? "Generating" : "Generate"}
+                    </button>
+                  </div>
+                </div>
+              </Panel>
+
+              {!script && !scriptError ? (
+                <div
+                  className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed py-24 text-center"
+                  style={{ borderColor: BORDER_STRONG, background: SURFACE }}
+                >
+                  <BarChart3 size={20} style={{ color: TEXT_QUIET }} />
+                  <p
+                    className="max-w-sm text-[13.5px]"
+                    style={{ color: TEXT_TERTIARY }}
+                  >
+                    Generate a script above to kick things off — the run
+                    results, live telemetry, and optimization strategies will
+                    appear here in order.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  {/* Script + Run/Telemetry side by side on wide       */}
+                  {/* screens — cause and effect next to each other,    */}
+                  {/* instead of stacked under a narrow centered column. */}
+                  <div className="grid grid-cols-1 gap-6 xl:grid-cols-5">
+                    {/* Panel — generated script */}
+                    <Panel className="xl:col-span-2">
+                      <PanelHeader
+                        icon={Code2}
+                        title="Script"
+                        action={
+                          script && (
+                            <div className="flex items-center gap-3">
+                              <button
+                                onClick={() => setScriptEditing((e) => !e)}
+                                className="rounded-md px-1.5 py-0.5 text-[11.5px] font-medium"
+                                style={{ color: TEXT_SECONDARY }}
+                              >
+                                {scriptEditing ? "Done" : "Edit"}
+                              </button>
+                              <button
+                                onClick={handleRunScript}
+                                disabled={scriptRunning || !script}
+                                className="flex items-center justify-center gap-1.5 rounded-lg px-3.5 py-1.5 text-[12px] font-bold transition-colors disabled:opacity-30"
+                                style={{
+                                  background: ACCENT,
+                                  color: TEXT_PRIMARY,
+                                }}
+                                onMouseEnter={(e) => {
+                                  if (!scriptRunning && script)
+                                    e.currentTarget.style.background =
+                                      ACCENT_HOVER;
+                                }}
+                                onMouseLeave={(e) =>
+                                  (e.currentTarget.style.background = ACCENT)
+                                }
+                              >
+                                {scriptRunning ? (
+                                  <Loader2 size={13} className="animate-spin" />
+                                ) : (
+                                  <Play size={13} />
+                                )}
+                                {scriptRunning ? "Running" : "Run"}
+                              </button>
+                            </div>
+                          )
+                        }
+                      />
+                      <div className="px-5 py-4">
+                        {scriptError && !script && (
+                          <ErrorChip icon={X}>{scriptError}</ErrorChip>
+                        )}
+                        {script && (
+                          <div
+                            className="max-h-[70vh] overflow-y-auto rounded-xl border"
+                            style={{
+                              borderColor: BORDER,
+                              background: "#FDFCF9",
+                            }}
+                          >
+                            {scriptEditing ? (
+                              <textarea
+                                value={script}
+                                onChange={(e) => setScript(e.target.value)}
+                                spellCheck={false}
+                                className="w-full resize-none bg-transparent px-3.5 py-3 text-[12.5px] leading-[1.7] outline-none"
+                                style={{
+                                  fontFamily: MONO,
+                                  color: TEXT_SECONDARY,
+                                  minHeight: 240,
+                                }}
+                              />
+                            ) : (
+                              <div className="overflow-x-auto px-2.5">
+                                <CodeBlock code={script} filePath="script.js" />
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </Panel>
+
+                    {/* Panel — run + live telemetry */}
+                    <Panel className="xl:col-span-3">
+                      <PanelHeader title="Run & live telemetry" />
+                      <div className="px-5 py-4">
+                        {scriptError &&
+                          loadResult === null &&
+                          !scriptRunning &&
+                          script && (
+                            <div className="mb-4">
+                              <ErrorChip icon={X}>{scriptError}</ErrorChip>
+                            </div>
+                          )}
+
+                        {scriptRunning && !loadResult && (
+                          <p
+                            className="text-[13px]"
+                            style={{ color: TEXT_SECONDARY }}
+                          >
+                            Sending traffic and collecting results — live output
+                            is in the console.
+                          </p>
+                        )}
+
+                        {progress && progress.status !== "done" && (
+                          <p
+                            className="mb-3 text-[11.5px]"
+                            style={{ color: TEXT_TERTIARY }}
+                          >
+                            {progress.status === "starting"
+                              ? "Starting k6…"
+                              : `${progress.sent} requests sent so far…`}
+                          </p>
+                        )}
+
+                        {loadResult && (
+                          <div className="mb-6 grid grid-cols-3 gap-2.5">
+                            <StatBlock
+                              label="Total"
+                              value={loadResult.requestsSent}
+                            />
+                            <StatBlock
+                              label="Errors"
+                              value={`${(loadResult.errorRate * 100).toFixed(1)}%`}
+                              alert={loadResult.errorRate > 0.01}
+                            />
+                            <StatBlock
+                              label="Avg"
+                              value={`${Math.round(loadResult.avgDurationMs)}ms`}
+                            />
+                            <StatBlock
+                              label="p95"
+                              value={
+                                loadResult.p95DurationMs !== null
+                                  ? `${Math.round(loadResult.p95DurationMs)}ms`
+                                  : "—"
+                              }
+                            />
+                            <StatBlock
+                              label="p99"
+                              value={
+                                loadResult.p99DurationMs !== null
+                                  ? `${Math.round(loadResult.p99DurationMs)}ms`
+                                  : "—"
+                              }
+                            />
+                            <StatBlock
+                              label="Req/sec"
+                              value={
+                                loadResult.requestsPerSecond !== null
+                                  ? loadResult.requestsPerSecond.toFixed(1)
+                                  : "—"
+                              }
+                            />
+                          </div>
+                        )}
+
+                        {loadResult && loadResult.thresholdsPassed !== null && (
+                          <div className="mb-6">
+                            {loadResult.thresholdsPassed ? (
+                              <span
+                                className="flex w-fit items-center gap-1.5 rounded-lg border px-3.5 py-2 text-[12.5px] font-medium"
+                                style={{
+                                  borderColor: LIVE,
+                                  color: LIVE,
+                                  background: LIVE_SOFT,
+                                }}
+                              >
+                                <Check size={13} /> All thresholds passed
+                              </span>
+                            ) : (
+                              <ErrorChip icon={X}>
+                                One or more thresholds failed
+                              </ErrorChip>
+                            )}
+                          </div>
+                        )}
+
+                        {(telemetry || isLivePolling) && (
+                          <div>
+                            <SectionLabel
+                              icon={BarChart3}
+                              action={
+                                isLivePolling ? (
+                                  <span
+                                    className="flex items-center gap-1.5 text-[11px] font-semibold"
+                                    style={{ color: ACCENT_TEXT }}
+                                  >
+                                    <span
+                                      className="h-1.5 w-1.5 animate-pulse rounded-full"
+                                      style={{ background: ACCENT }}
+                                    />
+                                    Live
+                                  </span>
+                                ) : undefined
+                              }
+                            >
+                              Telemetry
+                            </SectionLabel>
+
+                            {telemetry ? (
+                              <>
+                                <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
+                                  <StatBlock
+                                    label="Requests"
+                                    value={telemetry.requestCount}
+                                  />
+                                  <StatBlock
+                                    label="Error rate"
+                                    value={`${telemetry.errorRatePercent}%`}
+                                    alert={telemetry.errorRatePercent > 2}
+                                  />
+                                  <StatBlock
+                                    label="p50"
+                                    value={`${telemetry.latencyMs.p50} ms`}
+                                  />
+                                  <StatBlock
+                                    label="p95"
+                                    value={`${telemetry.latencyMs.p95} ms`}
+                                  />
+                                </div>
+                                {chartData.length > 1 && (
+                                  <div className="mt-4">
+                                    <ResponsiveContainer
+                                      width="100%"
+                                      height={200}
+                                    >
+                                      <LineChart data={chartData}>
+                                        <CartesianGrid
+                                          stroke={BORDER}
+                                          vertical={false}
+                                        />
+                                        <XAxis
+                                          dataKey="time"
+                                          stroke={TEXT_QUIET}
+                                          fontSize={10}
+                                        />
+                                        <YAxis
+                                          stroke={TEXT_QUIET}
+                                          fontSize={10}
+                                        />
+                                        <Tooltip
+                                          contentStyle={{
+                                            background: "#fff",
+                                            border: `1px solid ${BORDER_STRONG}`,
+                                            borderRadius: 8,
+                                            fontSize: 11.5,
+                                          }}
+                                          labelStyle={{ color: TEXT_PRIMARY }}
+                                        />
+                                        <Line
+                                          type="monotone"
+                                          dataKey="p50"
+                                          stroke={TEXT_TERTIARY}
+                                          dot={false}
+                                          strokeWidth={1.5}
+                                        />
+                                        <Line
+                                          type="monotone"
+                                          dataKey="p95"
+                                          stroke={ACCENT_HOVER}
+                                          dot={false}
+                                          strokeWidth={2}
+                                        />
+                                      </LineChart>
+                                    </ResponsiveContainer>
+                                  </div>
+                                )}
+                                {telemetry.requestCount === 0 && (
+                                  <p
+                                    className="mt-4 rounded-lg border px-3 py-2 text-[11.5px] font-medium"
+                                    style={{
+                                      borderColor: BORDER_STRONG,
+                                      color: TEXT_SECONDARY,
+                                    }}
+                                  >
+                                    No spans matched yet — still polling.
+                                  </p>
+                                )}
+                              </>
+                            ) : (
+                              <p
+                                className="text-[13px]"
+                                style={{ color: TEXT_TERTIARY }}
+                              >
+                                Run traffic to see live numbers here.
+                              </p>
+                            )}
+                          </div>
+                        )}
+
+                        {!loadResult &&
+                          !scriptRunning &&
+                          !scriptError &&
+                          script && (
+                            <p
+                              className="text-[13px]"
+                              style={{ color: TEXT_TERTIARY }}
+                            >
+                              Hit Run above to send traffic against this route.
+                            </p>
+                          )}
+                      </div>
+                    </Panel>
+                  </div>
+
+                  {/* Panel — root cause + strategy leaderboard.
+                      Gated on `hasEverRun`, NOT on `loadResult` — loadResult
+                      is deliberately nulled at the start of every new run,
+                      and gating this panel on it would unmount
+                      PerformanceReportFull (and any open Optimization
+                      Arena inside it) every time a fresh run kicks off.
+                      Full width: this panel can grow long (evidence lists,
+                      strategy leaderboard) and deserves the room. */}
+                  <Panel>
+                    <PanelHeader title="Analysis & optimization" />
+                    <div className="px-5 py-4">
+                      {!hasEverRun ? (
+                        <p
+                          className="text-[13px]"
+                          style={{ color: TEXT_TERTIARY }}
+                        >
+                          Finishes automatically once a run completes and
+                          telemetry catches up.
+                        </p>
+                      ) : (
+                        <PerformanceReportFull
+                          repositoryId={repositoryId}
+                          routeIndex={Number(routeIndex)}
+                          routeLabel={`${route.method} ${route.routePath}`}
+                          script={script ?? ""}
+                          authToken={authToken.trim() || undefined}
+                          loadResult={loadResult}
+                          report={perfReport}
+                          perfLoading={perfLoading}
+                          perfError={perfError}
+                          telemetry={telemetry}
+                          baseline={baselineResult}
+                          comparison={comparisonResult}
+                          comparisonLoading={comparisonLoading}
+                          onRunAgain={handleRunAgain}
+                        />
+                      )}
+                    </div>
+                  </Panel>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* ======================================================= */}
+          {/* Console — a bottom drawer over the workspace, brought     */}
+          {/* back into the white/cream family (mono readout on a       */}
+          {/* light sunken surface) instead of a black terminal that    */}
+          {/* broke the theme.                                          */}
+          {/* ======================================================= */}
+          {consoleOpen && (
+            <div
+              className="hidden shrink-0 flex-col overflow-hidden border-t md:flex"
+              style={{
+                height: consoleHeight,
+                borderColor: BORDER,
+                background: BG,
+                transition: "height 160ms ease",
+              }}
+            >
+              <div
+                className="flex items-center justify-between border-b px-4 py-2"
+                style={{ borderColor: BORDER, background: SURFACE }}
+              >
+                <span
+                  className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.06em]"
+                  style={{ color: TEXT_TERTIARY }}
+                >
+                  <Terminal size={12} /> Console
+                </span>
+                <button
+                  onClick={() => setConsoleExpanded((v) => !v)}
+                  className="rounded p-1"
+                  style={{ color: TEXT_TERTIARY }}
+                >
+                  {consoleExpanded ? (
+                    <ChevronDown size={13} />
+                  ) : (
+                    <ChevronUp size={13} />
+                  )}
+                </button>
+              </div>
+              <div className="min-h-0 flex-1">
+                <ExecutionConsole
+                  entries={entries}
+                  progress={progress}
+                  expanded={consoleExpanded}
+                  onToggleExpand={() => setConsoleExpanded((v) => !v)}
+                  onClear={reset}
+                  onClose={() => setConsoleOpen(false)}
+                />
+              </div>
+            </div>
+          )}
+        </main>
+      </div>
+
+      <SourceOverlay
+        open={sourceOpen}
+        onClose={() => setSourceOpen(false)}
+        connected={connected}
+        activeFile={activeFile}
+        onSelectFile={setActiveFile}
+      />
     </div>
   );
 }

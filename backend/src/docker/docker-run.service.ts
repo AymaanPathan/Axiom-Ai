@@ -1,9 +1,9 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getIO } from "../config/socket.js";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { RunModel } from "../models/run.model.js";
 import {
   startMetricsLoop,
@@ -39,8 +39,11 @@ interface StartRunOptions {
   localPath: string;
   envVars: Record<string, string>;
   appPort: number;
+  hostPort?: number;
   serviceName: string;
   healthCheckPath?: string;
+  containerName?: string;
+  nodeModulesCachePath?: string; 
 }
 
 // Tracks runs this server process actually spawned, so /stop can signal
@@ -60,17 +63,21 @@ export async function startDockerRun({
   localPath,
   envVars,
   appPort,
+  hostPort,
   serviceName,
   healthCheckPath,
+  containerName: customContainerName,
+  nodeModulesCachePath
 }: StartRunOptions): Promise<string> {
+  const publishedPort = hostPort ?? appPort;
   const run = await RunModel.create({
     repositoryId,
     userId,
     status: "starting",
-    port: appPort,
+    port: publishedPort,
   });
   const runId = run._id.toString();
-  const containerName = `axiom-run-${runId}`;
+  const containerName = customContainerName ?? `axiom-run-${runId}`;
 
   void executeRun({
     runId,
@@ -79,8 +86,10 @@ export async function startDockerRun({
     localPath,
     envVars,
     appPort,
+    hostPort: publishedPort,
     serviceName,
     healthCheckPath,
+    nodeModulesCachePath,
   }).catch(async (err) => {
     console.error(`Run ${runId} failed:`, err);
     const message = err instanceof Error ? err.message : "Unknown error";
@@ -146,8 +155,10 @@ async function executeRun({
   localPath,
   envVars,
   appPort,
+  hostPort,
   serviceName,
   healthCheckPath,
+  nodeModulesCachePath,
 }: {
   runId: string;
   repositoryId: string;
@@ -155,8 +166,10 @@ async function executeRun({
   localPath: string;
   envVars: Record<string, string>;
   appPort: number;
+  hostPort: number;
   serviceName: string;
   healthCheckPath?: string;
+  nodeModulesCachePath?: string;
 }) {
   const io = getIO();
   const tmpDir = path.join(os.tmpdir(), "axiom-runs", runId);
@@ -212,17 +225,25 @@ async function executeRun({
     "--network",
     SIGNOZ_DOCKER_NETWORK,
     "-p",
-    `${appPort}:${appPort}`,
+    `${hostPort}:${appPort}`,
     "--env-file",
     envFilePath,
     "-v",
     `${tmpDir}:/app`,
+    // Nested bind mount — must come AFTER the /app mount above so it
+    // layers on top of the source copy instead of being shadowed by it.
+    ...(nodeModulesCachePath
+      ? ["-v", `${nodeModulesCachePath}:/app/node_modules:ro`]
+      : []),
     "-w",
     "/app",
     RUNNER_IMAGE,
     "sh",
     "-c",
-    "npm install && (npm run build --if-present || true) && NODE_OPTIONS='--require /otel/tracing.js' npm start",
+    // Skip install entirely when node_modules is already populated (the
+    // arena's shared cache mount) — only fresh /repos/:id/run calls
+    // without a cache pay the install cost.
+    "if [ -d node_modules ] && [ \"$(ls -A node_modules 2>/dev/null)\" ]; then echo '[axiom] using cached node_modules, skipping install'; else npm install; fi && (npm run build --if-present || true) && NODE_OPTIONS='--require /otel/tracing.js' npm start",
   ];
 
   const child = spawn("docker", dockerArgs);
@@ -261,7 +282,7 @@ async function executeRun({
   // real startup failures as healthy.
   if (healthCheckPath) {
     void pollHealthCheck(
-      `http://localhost:${appPort}${healthCheckPath}`,
+      `http://localhost:${hostPort}${healthCheckPath}`,
       Date.now() + READINESS_TIMEOUT_MS,
       () => childExited,
     ).then(async (ok) => {

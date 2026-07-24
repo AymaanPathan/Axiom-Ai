@@ -26,7 +26,7 @@ export default function Workspace() {
         fontFeatureSettings: '"cv01" on, "ss03" on, "zero" on',
       }}
     >
-      <WorkspaceSidebar />
+      {/* <WorkspaceSidebar /> */}
 
       <main className="flex-1 overflow-y-auto">
         <div className="sticky top-0 z-10 border-b border-[#161718] bg-[#08090a]/90 px-8 py-4 backdrop-blur-md">

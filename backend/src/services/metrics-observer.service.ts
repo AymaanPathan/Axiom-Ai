@@ -1,19 +1,3 @@
-// backend/src/services/metrics-observer.service.ts
-//
-// Fills the gap the frontend has been calling into since the start:
-// getServiceHealth / getSystemStatus / getMetricHistory (REST) and the
-// service:metrics socket push.
-//
-// PARSING FIX: getServiceAggregate previously used findAliasValue(), which
-// cannot read SigNoz v5 scalar responses (see signoz.service.ts header for
-// why). Switched to extractScalarValues(), which reads by position instead
-// of by alias-as-object-key.
-//
-// CONTAINER METRICS: cpuPercent/memoryMB previously came from spawning
-// `docker stats` as a subprocess. Replaced with SigNoz queries against the
-// OTel Collector's `docker_stats` receiver (see signoz.io/docs/metrics-
-// management/docker-container-metrics) — requires that receiver running
-// against the Docker socket and exporting to this SigNoz instance.
 
 import mongoose from "mongoose";
 import { getIO } from "../config/socket.js";
@@ -92,7 +76,12 @@ async function getContainerResourceMetrics(
   const start = end - CONTAINER_METRIC_WINDOW_MS;
   const warnings: string[] = [];
   const escapedName = containerName.replace(/'/g, "\\'");
-  const filter = `${CONTAINER_NAME_ATTRIBUTE} = '${escapedName}'`;
+
+
+  const bareName = containerName.replace(/^\/+/, "");
+  const escapedBare = bareName.replace(/'/g, "\\'");
+  const escapedSlashed = `/${bareName}`.replace(/'/g, "\\'");
+  const filter = `(${CONTAINER_NAME_ATTRIBUTE} = '${escapedBare}' OR ${CONTAINER_NAME_ATTRIBUTE} = '${escapedSlashed}')`;
 
   const [cpuRaw, memRaw] = await Promise.all([
     runScalarMetricQuerySafe(

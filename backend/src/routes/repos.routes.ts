@@ -15,8 +15,8 @@ import { detectAppPort } from "../parsing/detect-port.js";
 import { resolveConnectedFiles } from "../parsing/connectedFiles.service.js";
 import { explainEndpoint } from "../services/explain.service.js";
 import { generateTrafficForRoute } from "../services/trafficGenerator.service.js";
-import { getDbOperationBreakdown, getRouteTelemetry } from "../services/signoz.service.js";
-import { analyzeLoadTestPerformance } from "../services/performanceAnalysis.service.js";
+import { DbOperationBreakdown, getDbOperationBreakdown, getRouteTelemetry, RouteTelemetry } from "../services/signoz.service.js";
+import { analyzeLoadTestPerformance, generateOptimizationStrategies, OptimizationStrategy } from "../services/performanceAnalysis.service.js";
 import {
   applySnippetReplace,
   revertFile,
@@ -31,7 +31,7 @@ import {
   generateLoadScript,
   buildEndpointMetadata,
 } from "../services/loadScriptGenerator.service.js";
-import { runLoadScript } from "../services/loadScriptRunner.service.js";
+import { LoadScriptResult, runLoadScript } from "../services/loadScriptRunner.service.js";
 import { detectRouteMiddlewares } from "../parsing/middleware-detect.js";
 
 import {
@@ -39,6 +39,9 @@ import {
   getRecentTraces,
   getRecentErrors,
 } from "../services/signoz-observability.service.js";
+import { finalizeArena, initArenaEnvironment, runArenaCandidate, runOptimizationArena } from "../services/optimizationArena.service.js";
+import { randomUUID } from "node:crypto";
+import { getIO } from "../config/socket.js";
 
 const router = Router();
 
@@ -737,6 +740,7 @@ router.post(
 
     const repoRoot = path.resolve(repository.localPath);
     let codeContext = "";
+    let knownFilePaths: string[] = [];
     try {
       const { files } = await resolveConnectedFiles(
         repoRoot,
@@ -746,6 +750,7 @@ router.post(
       codeContext = files
         .map((f) => `// ${f.path} (${f.role})\n${f.content}`)
         .join("\n\n");
+      knownFilePaths = files.map((f) => f.path);
     } catch (err) {
       console.error("Failed to resolve connected files for analysis:", err);
     }
@@ -762,14 +767,15 @@ router.post(
         );
         dbBreakdown = breakdown;
       }
-      
-       const report = await analyzeLoadTestPerformance({
-         metadata: { method: route.method, routePath: route.routePath },
-         runResult,
-         telemetry: telemetry ?? null,
-         codeContext,
-         dbBreakdown,
-       });
+
+      const report = await analyzeLoadTestPerformance({
+        metadata: { method: route.method, routePath: route.routePath },
+        runResult,
+        telemetry: telemetry ?? null,
+        codeContext,
+        dbBreakdown,
+        knownFilePaths,
+      });
 
       res.json(report);
     } catch (err) {
@@ -780,7 +786,6 @@ router.post(
     }
   },
 );
-
 const CONTAINER_RESTART_WAIT_MS = 2000;
 const HEALTHCHECK_RETRIES = 40; // 40 × 1500ms = 60s budget after the initial wait
 const HEALTHCHECK_INTERVAL_MS = 1500;
@@ -1016,6 +1021,170 @@ router.post(
       console.error("Failed to run load script:", err);
       const message =
         err instanceof Error ? err.message : "Failed to run load script";
+      res.status(502).json({ error: message });
+    }
+  },
+);
+
+
+router.post(
+  "/:id/generate-strategies",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    const { routeIndex, runResult, telemetry } = req.body as {
+      routeIndex?: number;
+      runResult?: LoadScriptResult;
+      telemetry?: RouteTelemetry | null;
+    };
+    if (routeIndex === undefined || !runResult) {
+      return res
+        .status(400)
+        .json({ error: "routeIndex and runResult are required" });
+    }
+
+    const repository = await RepositoryModel.findOne({
+      _id: req.params.id,
+      userId: req.user!.githubId,
+    });
+    if (!repository)
+      return res.status(404).json({ error: "Repository not found" });
+
+    const route = repository.discoveredRoutes[routeIndex];
+    if (!route) return res.status(400).json({ error: "Unknown routeIndex" });
+
+    const repoRoot = path.resolve(repository.localPath);
+    let codeContext = "";
+    let knownFilePaths: string[] = [];
+    try {
+      const { files } = await resolveConnectedFiles(
+        repoRoot,
+        route.file,
+        route.line,
+      );
+      codeContext = files
+        .map((f) => `// ${f.path} (${f.role})\n${f.content}`)
+        .join("\n\n");
+      knownFilePaths = files.map((f) => f.path);
+    } catch (err) {
+      console.error("Failed to resolve connected files for strategies:", err);
+    }
+
+    try {
+      let dbBreakdown: DbOperationBreakdown[] = [];
+      if (telemetry) {
+        const serviceName = repository.githubFullName.split("/")[1];
+        const { breakdown } = await getDbOperationBreakdown(
+          serviceName,
+          runResult.windowStart,
+          runResult.windowEnd,
+        );
+        dbBreakdown = breakdown;
+      }
+      const result = await generateOptimizationStrategies({
+        metadata: { method: route.method, routePath: route.routePath },
+        runResult,
+        telemetry: telemetry ?? null,
+        codeContext,
+        dbBreakdown,
+        knownFilePaths,
+      });
+      res.json(result);
+    } catch (err) {
+      console.error("Failed to generate strategies:", err);
+      const message =
+        err instanceof Error ? err.message : "Failed to generate strategies";
+      res.status(502).json({ error: message });
+    }
+  },
+);
+
+router.post("/:id/init-arena", requireAuth, async (req: AuthedRequest, res) => {
+  const { routeIndex } = req.body as { routeIndex?: number };
+  if (routeIndex === undefined) {
+    return res.status(400).json({ error: "routeIndex is required" });
+  }
+
+  const repository = await RepositoryModel.findOne({
+    _id: req.params.id,
+    userId: req.user!.githubId,
+  });
+  if (!repository)
+    return res.status(404).json({ error: "Repository not found" });
+
+  const route = repository.discoveredRoutes[routeIndex];
+  if (!route) return res.status(400).json({ error: "Unknown routeIndex" });
+
+  const decrypted: Record<string, string> = {};
+  for (const entry of repository.envVars)
+    decrypted[entry.key] = decryptEnvValue(entry);
+
+  const arenaId = randomUUID();
+
+  try {
+    await initArenaEnvironment({
+      arenaId,
+      repositoryId: repository._id.toString(),
+      userId: req.user!.githubId,
+      sourceLocalPath: path.resolve(repository.localPath),
+      envVars: decrypted,
+      method: route.method,
+      routePath: route.routePath,
+      appPort: repository.appPort,
+    });
+    res.status(201).json({ arenaId });
+  } catch (err) {
+    console.error("Failed to init arena:", err);
+    res.status(500).json({ error: "Failed to initialize arena environment" });
+  }
+});
+
+router.post(
+  "/:id/run-arena-candidate",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    const { arenaId, strategy, script, authToken } = req.body as {
+      arenaId?: string;
+      strategy?: OptimizationStrategy;
+      script?: string;
+      authToken?: string;
+    };
+    if (!arenaId || !strategy || !script?.trim()) {
+      return res
+        .status(400)
+        .json({ error: "arenaId, strategy, and script are required" });
+    }
+
+    try {
+      const result = await runArenaCandidate({
+        arenaId,
+        strategy,
+        script,
+        authToken,
+      });
+      res.json({ result });
+    } catch (err) {
+      console.error("Failed to run arena candidate:", err);
+      const message =
+        err instanceof Error ? err.message : "Failed to run candidate";
+      res.status(502).json({ error: message });
+    }
+  },
+);
+
+router.post(
+  "/:id/finalize-arena",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    const { arenaId } = req.body as { arenaId?: string };
+    if (!arenaId) return res.status(400).json({ error: "arenaId is required" });
+
+    try {
+      const result = await finalizeArena(arenaId);
+      res.json(result);
+    } catch (err) {
+      console.error("Failed to finalize arena:", err);
+      const message =
+        err instanceof Error ? err.message : "Failed to finalize arena";
       res.status(502).json({ error: message });
     }
   },

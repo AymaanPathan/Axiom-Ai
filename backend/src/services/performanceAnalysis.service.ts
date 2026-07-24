@@ -40,6 +40,27 @@ interface ComputedMetrics {
   errorRatePercent: number;
 }
 
+export interface OptimizationStrategy {
+  id: string; // "A" | "B" | "C"
+  title: string; // "Batch database queries"
+  approach: string; // short tag: "batching" | "caching" | "aggregation" | ...
+  description: string;
+  estimatedImprovementPercent: { min: number; max: number };
+  diff: {
+    filePath: string;
+    originalCode: string;
+    newCode: string;
+    unifiedDiff: string;
+  };
+  confidence: "high" | "medium" | "low";
+}
+
+export interface StrategyGenerationResult {
+  rootCause: string;
+  severity: "critical" | "warning" | "info";
+  strategies: OptimizationStrategy[]; // 2-3, never fabricated to hit a count
+}
+
 function computeMetrics(
   runResult: LoadScriptResult,
   telemetry: RouteTelemetry | null,
@@ -165,7 +186,9 @@ function estimateCeiling(
 ): number {
   // If the overlap flag fired, the underlying % is unreliable (sampling-
   // window mismatch) — don't let it inflate the ceiling on its own.
-  const dbShare = metrics.dbCallsOverlap ? 50 : (metrics.dbTimeSharePercent ?? 0);
+  const dbShare = metrics.dbCallsOverlap
+    ? 50
+    : (metrics.dbTimeSharePercent ?? 0);
   const externalShare = metrics.externalCallsOverlap
     ? 50
     : (metrics.externalTimeSharePercent ?? 0);
@@ -189,6 +212,22 @@ function clampImprovementEstimate(
   const max = Math.min(estimate.max, ceiling);
   const min = Math.min(estimate.min, Math.max(5, max - 15));
   return { min: Math.max(1, min), max: Math.max(min + 1, max) };
+}
+
+// Counts non-overlapping occurrences of `needle` in `haystack`. Used to
+// verify a strategy's `originalCode` snippet is unique before we ever
+// try to apply it — an ambiguous snippet should be caught and discarded
+// HERE, at generation time, not discovered 2 minutes into an arena run
+// after the sandbox/container/benchmark cost has already been paid.
+function countOccurrences(haystack: string, needle: string): number {
+  if (!needle) return 0;
+  let count = 0;
+  let index = haystack.indexOf(needle);
+  while (index !== -1) {
+    count++;
+    index = haystack.indexOf(needle, index + needle.length);
+  }
+  return count;
 }
 
 function buildPrompt(
@@ -250,12 +289,11 @@ Rules:
 4. If DB spans-per-request is close to 1 but latency is still high, look for missing indexes, oversized payloads, or unbounded queries (no .limit()) in the code instead — don't call it N+1 if it isn't.
 5. If external-call time share dominates, the fix is about caching/parallelizing/timeout tuning on that call, not the database.
 6. Evidence bullets must each cite a real number from above or the structural finding. Do not fabricate span counts, percentages, or line references not present in the code.
-7. "originalCode" must be an exact, verbatim substring of the source shown above — copy-paste it, do not retype or reformat it, or the patch cannot be located and applied. Keep it as short as possible while still being unique in the file (a whole function is usually right; the whole file is not).
+7. "originalCode" must be an exact, verbatim substring of the source shown above — copy-paste it, do not retype or reformat it, or the patch cannot be located and applied. Keep it as short as possible while still being UNIQUE in the file — if the same lines appear more than once anywhere in the source shown, expand the snippet (add a line above/below) until it is unique, or the patch will be rejected.
 8. estimatedImprovementPercent must stay within the MAX DEFENSIBLE IMPROVEMENT ESTIMATE given above — do not invent a larger number no matter how convincing the fix seems.
 9. If a per-operation DB breakdown is available above, prefer citing the SPECIFIC named operation and its own call count/duration in your evidence (e.g. "Product.find() was called 74 times, averaging 2.1ms each, totaling 155ms") over the generic blended DB average — this is far stronger, more credible evidence than an aggregate number.
 `;
 }
-
 
 function formatDbBreakdown(
   breakdown: DbOperationBreakdown[] | undefined,
@@ -362,4 +400,215 @@ export async function analyzeLoadTestPerformance(opts: {
   };
 
   return { ...parsed, diff, suggestedFix, computed };
+}
+
+function buildStrategiesPrompt(
+  metadata: { method: string; routePath: string },
+  metrics: ComputedMetrics,
+  codeContext: string,
+  structural: StructuralFinding,
+): string {
+  return `You are a senior performance engineer. Propose 2-3 GENUINELY DIFFERENT ways to fix the
+performance problem below — different mechanisms, not variations of the same patch (e.g. don't
+propose "batch with Promise.all" and "batch with a for-loop" as two strategies — that's one strategy).
+
+Valid mechanism categories to choose from (pick only ones that plausibly apply to this code):
+- batching: collapse N sequential queries into one query (e.g. $in, batched find)
+- caching: introduce a cache layer (Redis/in-memory) for repeated reads
+- aggregation: push computation into the database via an aggregation/pipeline instead of app-side loops
+- indexing: add/change an index to remove a full collection scan (only if a scan is evident)
+- pagination-or-limit: bound an unbounded query
+- parallelization: convert independent sequential awaits into Promise.all (ONLY if the calls are truly independent of each other's results — never propose this for a loop where each iteration's query depends on nothing from prior iterations, i.e. only when it's safe)
+
+Respond with ONLY raw JSON, no markdown fences:
+{
+  "rootCause": string,
+  "severity": "critical" | "warning" | "info",
+  "strategies": [
+    {
+      "id": "A",
+      "title": string,
+      "approach": one of the category slugs above,
+      "description": string, // 2-3 sentences, concrete, referencing the actual code
+      "estimatedImprovementPercent": { "min": number, "max": number },
+      "diff": { "filePath": string, "originalCode": string, "newCode": string },
+      "confidence": "high" | "medium" | "low"
+    }
+  ]
+}
+
+Rules:
+1. Every "originalCode" must be an exact verbatim substring of the source shown below, AND it must
+   be UNIQUE — if the same lines appear more than once anywhere in the source, expand the snippet
+   (include more surrounding lines) until it only matches one place. A snippet that matches more than
+   once cannot be safely applied and the strategy will be discarded.
+2. Only propose a mechanism that is actually applicable to this code — do not invent a caching
+   strategy if there's nowhere sensible to cache, do not invent parallelization if the queries
+   are dependent. It is fine to return only 2 strategies if a 3rd would be contrived.
+3. Each strategy's estimatedImprovementPercent.max MUST NOT exceed ${estimateCeiling(metrics, structural)}%.
+4. Follow the same evidentiary rules as before: never call sequential awaits "concurrent", never
+   claim a loop/N+1 exists unless structural evidence confirms it.
+5. Strategies must be meaningfully different diffs — not the same patch reworded.
+
+${
+  structural.found
+    ? `STRUCTURAL EVIDENCE: a loop calling an async DB-shaped function was found: "${structural.detail}..." — treat this as real, primary evidence.`
+    : `STRUCTURAL EVIDENCE: no per-item DB call loop was found. Do not propose a "batching" fix framed as N+1 remediation unless you can point to the actual loop below.`
+}
+
+Endpoint: ${metadata.method} ${metadata.routePath}
+MEASURED METRICS:
+- Requests sent: ${metrics.requestsSent}
+- Avg latency: ${metrics.avgMs.toFixed(0)}ms, P95: ${metrics.p95Ms ?? "n/a"}ms
+- DB spans/request: ${metrics.dbSpansPerRequest ?? "n/a"}, DB time share: ${metrics.dbTimeSharePercent ?? "n/a"}%
+- External calls/request: ${metrics.externalSpansPerRequest ?? "n/a"}, share: ${metrics.externalTimeSharePercent ?? "n/a"}%
+
+SOURCE:
+${codeContext.slice(0, MAX_CODE_CONTEXT_CHARS)}
+`;
+}
+
+// Two diffs count as "the same strategy" if they touch the same file and their
+// newCode bodies are near-identical after whitespace normalization. Cheap guard
+// against the LLM padding out to 3 by rewording one fix.
+function dedupeStrategies(
+  strategies: OptimizationStrategy[],
+): OptimizationStrategy[] {
+  const seen: string[] = [];
+  const out: OptimizationStrategy[] = [];
+  for (const s of strategies) {
+    const norm = `${s.diff.filePath}::${s.diff.newCode.replace(/\s+/g, " ").trim()}`;
+    const isDup = seen.some((prev) => {
+      const a = new Set(norm.split(" "));
+      const b = new Set(prev.split(" "));
+      const overlap = [...a].filter((w) => b.has(w)).length;
+      return overlap / Math.max(a.size, b.size) > 0.85; // near-identical token overlap
+    });
+    if (!isDup) {
+      seen.push(norm);
+      out.push(s);
+    }
+  }
+  return out;
+}
+
+export async function generateOptimizationStrategies(opts: {
+  metadata: { method: string; routePath: string };
+  runResult: LoadScriptResult;
+  telemetry: RouteTelemetry | null;
+  codeContext: string;
+  dbBreakdown?: DbOperationBreakdown[];
+  knownFilePaths: string[];
+}): Promise<StrategyGenerationResult> {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error("GROQ_API_KEY is not configured on the server.");
+
+  const computed = computeMetrics(opts.runResult, opts.telemetry);
+  const structural = detectLoopedDbCall(opts.codeContext);
+
+  const response = await fetch(GROQ_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a senior performance engineer proposing multiple distinct, real fixes. You never invent metrics, never mislabel sequential code as concurrent, and every diff is a real minimal patch against the exact code shown — unique within it. Respond with raw JSON only.",
+        },
+        {
+          role: "user",
+          content: buildStrategiesPrompt(
+            opts.metadata,
+            computed,
+            opts.codeContext,
+            structural,
+          ),
+        },
+      ],
+      temperature: 0.4,
+      max_tokens: 2500,
+      response_format: { type: "json_object" },
+    }),
+  });
+
+  if (!response.ok) {
+    const errBody = await response.text().catch(() => "");
+    throw new Error(
+      `Groq API error (${response.status}): ${errBody.slice(0, 200)}`,
+    );
+  }
+
+  const data = await response.json();
+  const raw: string | undefined = data.choices?.[0]?.message?.content;
+  if (!raw) throw new Error("Groq API returned no strategies");
+
+  let parsed: StrategyGenerationResult;
+  try {
+    const cleaned = raw
+      .trim()
+      .replace(/^```(?:json)?\n?/, "")
+      .replace(/```$/, "")
+      .trim();
+    parsed = JSON.parse(cleaned);
+  } catch {
+    throw new Error("Failed to parse strategies JSON");
+  }
+
+  const withDiffs = parsed.strategies
+    .filter((s) => {
+      const known = opts.knownFilePaths.includes(s.diff.filePath);
+      if (!known) {
+        console.warn(
+          `Discarding strategy ${s.id}: filePath "${s.diff.filePath}" wasn't in the resolved code context`,
+        );
+        return false;
+      }
+      // Catch ambiguous snippets HERE — before any sandbox/container/
+      // benchmark cost is spent on a strategy that codePatch.service.ts
+      // will end up refusing to apply anyway.
+      const occurrences = countOccurrences(
+        opts.codeContext,
+        s.diff.originalCode,
+      );
+      if (occurrences !== 1) {
+        console.warn(
+          `Discarding strategy ${s.id}: originalCode matches ${occurrences} place(s) in the resolved code — must be exactly 1 to apply safely.`,
+        );
+        return false;
+      }
+      return true;
+    })
+    .map((s) => ({
+      ...s,
+      estimatedImprovementPercent: clampImprovementEstimate(
+        s.estimatedImprovementPercent,
+        computed,
+        structural,
+      ),
+      diff: {
+        ...s.diff,
+        unifiedDiff: buildDisplayDiff(
+          s.diff.filePath,
+          s.diff.originalCode,
+          s.diff.newCode,
+        ),
+      },
+    }));
+
+  const deduped = dedupeStrategies(withDiffs);
+  if (deduped.length === 0)
+    throw new Error(
+      "The model didn't produce any strategies with a unique, safely-applicable code change. Try generating again.",
+    );
+
+  return {
+    rootCause: parsed.rootCause,
+    severity: parsed.severity,
+    strategies: deduped,
+  };
 }

@@ -143,12 +143,22 @@ export async function runLoadScript(opts: {
   repositoryId: string;
   script: string;
   authToken?: string;
+  // When set, live per-request progress is ALSO broadcast to the arena's
+  // socket room, tagged with strategyId — lets the Optimization Arena UI
+  // show real running requests/success/error/avg-latency numbers while a
+  // candidate is still benchmarking, not just after it finishes. Arena
+  // candidates run sequentially (see optimizationArena.service.ts), so
+  // there's never ambiguity about which candidate a given progress event
+  // belongs to.
+  arena?: { arenaId: string; strategyId: string };
 }): Promise<LoadScriptResult> {
-  const { repositoryId, script: rawScript, authToken } = opts;
+  const { repositoryId, script: rawScript, authToken, arena } = opts;
   const script = ensureRequiredImports(rawScript);
 
   const io = getIO();
   const room = `repo:${repositoryId}`;
+  const arenaRoom = arena ? `arena:${arena.arenaId}` : null;
+
   const emitLog = (payload: object) => io.to(room).emit("traffic:log", payload);
   const emitProgress = (payload: object) =>
     io.to(room).emit("traffic:progress", payload);
@@ -173,6 +183,24 @@ export async function runLoadScript(opts: {
       ...payload,
       timestamp: Date.now(),
     });
+  // Arena-scoped live progress — same numbers as emitProgress, tagged
+  // with strategyId, sent to the arena room only. A no-op when not
+  // running inside an arena.
+  const emitArenaProgress = (payload: object) => {
+    if (!arenaRoom || !arena) return;
+    io.to(arenaRoom).emit("arena:candidate:progress", {
+      strategyId: arena.strategyId,
+      ...payload,
+    });
+  };
+
+  const emitArenaLog = (payload: object) => {
+    if (!arenaRoom || !arena) return;
+    io.to(arenaRoom).emit("arena:candidate:log", {
+      strategyId: arena.strategyId,
+      ...payload,
+    });
+  };
 
   const windowStart = Date.now();
   emitProgress({ status: "starting", total: -1, sent: 0 });
@@ -243,12 +271,34 @@ export async function runLoadScript(opts: {
             responseBody: failureDetail?.full ?? null,
             timestamp: Date.now(),
           });
+
+          emitArenaLog({
+            index: sent,
+            status: result.status,
+            ok: result.ok,
+            method: result.method ?? null,
+            url: result.url ?? null,
+            durationMs: result.durationMs ?? null,
+            responseBodySummary: failureDetail?.summary ?? null,
+            timestamp: Date.now(),
+          });
+          const runningAvgDurationMs =
+            sent > 0 ? Math.round(durationSum / sent) : 0;
           emitProgress({
             status: "running",
             total: -1,
             sent,
             successCount: liveSuccess,
             errorCount: liveError,
+          });
+          emitArenaProgress({
+            status: "running",
+            sent,
+            successCount: liveSuccess,
+            errorCount: liveError,
+            avgDurationMs: runningAvgDurationMs,
+            lastStatus: result.status,
+            lastOk: result.ok,
           });
         } catch {
           // malformed RESULT line — surface it rather than silently drop it,

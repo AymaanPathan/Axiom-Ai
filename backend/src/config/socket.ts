@@ -1,3 +1,4 @@
+// backend/src/config/socket.ts
 import { Server as IOServer } from "socket.io";
 import type { Server as HTTPServer } from "node:http";
 
@@ -17,14 +18,23 @@ export function initSocket(httpServer: HTTPServer): IOServer {
       socket.leave(`run:${runId}`),
     );
 
-    // NEW — repo-scoped room, used by the Observability dashboard's live
-    // logs/metrics feed (independent of any single runId, since runs are
-    // ephemeral and the dashboard shouldn't need to know the current one).
     socket.on("service:subscribe", (repositoryId: string) =>
       socket.join(`repo:${repositoryId}`),
     );
     socket.on("service:unsubscribe", (repositoryId: string) =>
       socket.leave(`repo:${repositoryId}`),
+    );
+
+    // NEW — arena-scoped room. The Optimization Arena view joins this the
+    // moment it has an arenaId (before any candidate has started) so it
+    // catches every `arena:candidate:status` / `arena:candidate:metrics`
+    // / `arena:complete` event for that run. Same subscribe/unsubscribe
+    // shape as run: and service: above, for consistency.
+    socket.on("arena:subscribe", (arenaId: string) =>
+      socket.join(`arena:${arenaId}`),
+    );
+    socket.on("arena:unsubscribe", (arenaId: string) =>
+      socket.leave(`arena:${arenaId}`),
     );
   });
 
