@@ -1,4 +1,5 @@
 import { Outlet } from "react-router-dom";
+import { BG, SANS, TEXT_SECONDARY } from "../theme";
 
 /**
  * Axiom AI — Workspace shell
@@ -7,21 +8,12 @@ import { Outlet } from "react-router-dom";
  * rendered inside <RequireAuth>, so a valid session can be assumed here.
  */
 export default function Workspace() {
-
-
   return (
     <div
-      className="flex min-h-screen bg-[#08090a] text-[#d0d6e0] antialiased"
-      style={{
-        fontFamily:
-          "'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
-        fontFeatureSettings: '"cv01" on, "ss03" on, "zero" on',
-      }}
+      className="flex min-h-screen antialiased"
+      style={{ background: BG, color: TEXT_SECONDARY, fontFamily: SANS }}
     >
-
       <main className="flex-1 overflow-y-auto">
-
-
         <Outlet />
       </main>
     </div>
