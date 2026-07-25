@@ -19,6 +19,7 @@ const HEALTHCHECK_RETRIES = 120;
 const HEALTHCHECK_INTERVAL_MS = 1800;
 const CONTAINER_BOOT_WAIT_MS = 2000;
 const METRICS_POLL_INTERVAL_MS = 1000;
+const TELEMETRY_POLL_INTERVAL_MS = 2500;
 
 export type ArenaStage =
   | "queued"
@@ -148,6 +149,13 @@ function retargetScriptPort(script: string, port: number): string {
   );
 }
 
+// FIXED: previously used a bare setInterval, which only fires AFTER the
+// first full interval elapses (1000ms here). Fast benchmarks — e.g. a
+// small VU count that finishes in a few hundred ms — could complete and
+// call stopMetricsPolling() before a single tick ever ran, meaning the
+// live CPU/Mem panel and metricsHistory stayed empty for the entire
+// candidate even though the container was up and being sampled-for. Now
+// we fire one sample immediately, then fall into the normal interval.
 function startLiveMetricsPolling(
   arenaId: string,
   strategyId: string,
@@ -159,7 +167,8 @@ function startLiveMetricsPolling(
   }) => void,
 ): () => void {
   let stopped = false;
-  const timer = setInterval(async () => {
+
+  const tick = async () => {
     if (stopped) return;
     const metrics =
       (await getContainerResourceMetricsSafe(serviceName)) ??
@@ -172,12 +181,17 @@ function startLiveMetricsPolling(
     };
     onSample(sample);
     emitArena(arenaId, "arena:candidate:metrics", { strategyId, ...sample });
-  }, METRICS_POLL_INTERVAL_MS);
+  };
+
+  void tick(); // sample immediately instead of waiting a full interval
+  const timer = setInterval(tick, METRICS_POLL_INTERVAL_MS);
+
   return () => {
     stopped = true;
     clearInterval(timer);
   };
 }
+
 async function runOneCandidate(opts: {
   arenaId: string;
   repositoryId: string;
@@ -435,6 +449,16 @@ export async function runOptimizationArena(opts: {
     winnerStrategyId: winner?.strategyId ?? null,
   };
 }
+
+// FIXED: previously `if (cpu === null && mem === null) return null;` — this
+// only fell back to `docker stats` when BOTH SigNoz metrics were missing.
+// If your SigNoz instance isn't scraping one of container.cpu.utilization /
+// container.memory.usage.total (a very common setup gap — those come from
+// a host/container metrics receiver, not from the trace exporter), one
+// query could come back null while the other spuriously resolves, and the
+// `??` below would silently bake in a wrong "0" for the missing one
+// instead of falling through to the accurate docker-stats fallback. Now
+// EITHER metric being null triggers the fallback for the whole reading.
 async function getContainerResourceMetricsSafe(
   serviceName: string,
 ): Promise<{ cpuPercent: number; memoryMB: number } | null> {
@@ -477,10 +501,10 @@ async function getContainerResourceMetricsSafe(
   ]);
   const cpu = extractScalarValues(cpuRaw, [{ alias: "value" }]).value;
   const mem = extractScalarValues(memRaw, [{ alias: "value" }]).value;
-  if (cpu === null && mem === null) return null;
+  if (cpu === null || mem === null) return null;
   return {
-    cpuPercent: cpu !== null ? Math.round(cpu * 10000) / 100 : 0,
-    memoryMB: mem !== null ? Math.round((mem / 1024 / 1024) * 100) / 100 : 0,
+    cpuPercent: Math.round(cpu * 10000) / 100,
+    memoryMB: Math.round((mem / 1024 / 1024) * 100) / 100,
   };
 }
 
@@ -624,9 +648,11 @@ async function getDockerStatsFallback(
   });
 }
 
-// Polls SigNoz for the route's p50/p95/error rate DURING benchmarking,
-// not just after — same query used by getTelemetry, on a 2.5s tick,
-// scoped to the arena room only.
+// FIXED: same immediate-sample issue as startLiveMetricsPolling above —
+// previously used a bare setInterval(..., 2500ms), so a benchmark that
+// finished inside 2.5s never got a single telemetry emit and the arena
+// UI's SigNoz panel sat on "Waiting for spans…" for the entire run even
+// once spans were actually being exported. Now fires once immediately.
 function startLiveTelemetryPolling(
   arenaId: string,
   strategyId: string,
@@ -636,7 +662,8 @@ function startLiveTelemetryPolling(
   windowStart: number,
 ): () => void {
   let stopped = false;
-  const timer = setInterval(async () => {
+
+  const tick = async () => {
     if (stopped) return;
     try {
       const t = await getRouteTelemetry(
@@ -655,7 +682,11 @@ function startLiveTelemetryPolling(
     } catch {
       // keep last good value, retry next tick
     }
-  }, 2500);
+  };
+
+  void tick(); // sample immediately instead of waiting a full interval
+  const timer = setInterval(tick, TELEMETRY_POLL_INTERVAL_MS);
+
   return () => {
     stopped = true;
     clearInterval(timer);

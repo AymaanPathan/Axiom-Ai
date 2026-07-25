@@ -21,6 +21,17 @@ services:
     volumes:
       - redis_data:/data
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: axiom-otel-collector
+    restart: unless-stopped
+
+    command: ["--config=/etc/otel-collector-config.yaml"]
+
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
+      - /var/run/docker.sock:/var/run/docker.sock
+
 volumes:
   mongodb_data:
   redis_data:

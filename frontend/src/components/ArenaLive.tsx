@@ -1935,7 +1935,7 @@ function InspectorDrawer({
             />
             <LatencyPanel live={live} result={result} isLive={isLive} />
             <ThroughputPanel live={live} isLive={isLive} />
-            <TelemetryPanel live={live} isLive={isLive} />
+            {/* <TelemetryPanel live={live} isLive={isLive} /> */}
 
             <div className="flex items-center gap-1">
               <button

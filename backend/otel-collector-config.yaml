@@ -1,0 +1,48 @@
+# Merge this into your existing otel-collector-config.yaml.
+# If you already have `receivers:` / `processors:` / `service.pipelines.metrics`
+# blocks (e.g. for other metrics), just add the new entries below into them —
+# don't duplicate the top-level keys.
+
+receivers:
+  docker_stats:
+    endpoint: unix:///var/run/docker.sock
+    collection_interval: 5s # matches your PUSH_INTERVAL_MS in metrics-observer.service.ts
+    metrics:
+      container.cpu.utilization:
+        enabled: true
+      container.memory.percent:
+        enabled: true
+      container.memory.usage.total:
+        enabled: true
+      container.memory.usage.limit:
+        enabled: true
+
+processors:
+  resourcedetection/docker:
+    detectors: [env, docker]
+    timeout: 2s
+    override: false
+
+exporters:
+  otlp:
+    # SigNoz Cloud — swap for self-host per the docs if that's your setup:
+    # endpoint: "{signoz-instance}:4317" / tls.insecure: true
+    endpoint: "ingest.{region}.signoz.cloud:443"
+    tls:
+      insecure: false
+    headers:
+      signoz-ingestion-key: "{signoz-ingestion-key}"
+
+service:
+  pipelines:
+    metrics:
+      receivers: [docker_stats]
+      processors: [resourcedetection/docker]
+      exporters: [otlp]
+
+# If the OTel Collector itself runs inside a container (not on the Docker
+# host directly), you MUST mount the host's docker socket into it:
+#   docker run -v /var/run/docker.sock:/var/run/docker.sock ...
+# Without this mount, docker_stats silently reports nothing and your
+# `getContainerMetricsFromSignoz()` calls will just return null forever —
+# that's the #1 thing to check if the panel shows "unavailable".

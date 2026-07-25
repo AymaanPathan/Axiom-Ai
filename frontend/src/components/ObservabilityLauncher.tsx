@@ -291,17 +291,6 @@ export default function ObservabilityLauncher({
         >
           <AmbientGlow />
 
-          <span
-            className="relative rounded-full border px-3 py-1 text-[11px] font-bold uppercase tracking-[0.24em] backdrop-blur-md"
-            style={{
-              color: GLASS.accentOn,
-              fontFamily: MONO,
-              background: GLASS.accentSoft,
-              borderColor: "transparent",
-            }}
-          >
-            Booting · {elapsed}s
-          </span>
 
           <h1
             key={phase}

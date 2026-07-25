@@ -1291,7 +1291,7 @@ export default function ApiWorkspace() {
 
                         {loadResult && loadResult.thresholdsPassed !== null && (
                           <div className="mb-6">
-                            {loadResult.thresholdsPassed ? (
+                            {loadResult.thresholdsPassed && (
                               <span
                                 className="flex w-fit items-center gap-1.5 rounded-lg border px-3.5 py-2 text-[12.5px] font-medium"
                                 style={{
@@ -1302,10 +1302,6 @@ export default function ApiWorkspace() {
                               >
                                 <Check size={13} /> All thresholds passed
                               </span>
-                            ) : (
-                              <ErrorChip icon={X}>
-                                One or more thresholds failed
-                              </ErrorChip>
                             )}
                           </div>
                         )}

@@ -1076,6 +1076,17 @@ router.post(
     const repoRoot = path.resolve(repository.localPath);
     let codeContext = "";
     let knownFilePaths: string[] = [];
+
+    let existingFilePaths: string[] = [];
+    try {
+      const allAbsolute = await listSourceFiles(repoRoot);
+      existingFilePaths = allAbsolute.map((p) => path.relative(repoRoot, p));
+    } catch (err) {
+      console.error(
+        "Failed to list source files for strategy generation:",
+        err,
+      );
+    }
     try {
       const { files } = await resolveConnectedFiles(
         repoRoot,
@@ -1128,6 +1139,7 @@ router.post(
         codeContext,
         dbBreakdown,
         knownFilePaths,
+        existingFilePaths,
         knownDependencies,
         knownEnvVars,
       });
@@ -1234,6 +1246,7 @@ router.post(
 );
 
 import type { ArenaCandidateResult } from "../services/optimizationArena.service.js";
+import { listSourceFiles } from "../services/sourceFiles.util.js";
 
 function slugify(s: string): string {
   return s

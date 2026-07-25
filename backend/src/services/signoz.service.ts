@@ -1,28 +1,3 @@
-// signoz.service.ts — parsing fix
-//
-// ROOT CAUSE OF "everything shows 0": SigNoz v5 scalar responses do NOT
-// embed the aggregation alias anywhere in the JSON. Each column comes back
-// as { name: "__result_0", aggregationIndex: 0, ... } and the actual
-// numbers live in a positional array: data: [[val0, val1, val2, ...]].
-// The old findAliasValue() searched the tree for an object key literally
-// matching the alias string ("p50", "request_count", etc.) — that key
-// never exists in this shape, so it always returned null, and every call
-// site silently fell back to `?? 0`. Real telemetry was being fetched
-// successfully the whole time; it just never got read out of the response.
-//
-// Fix: extract by position. The order of the "columns"/"data" arrays in
-// the response matches the order of the `aggregations` array you sent in
-// the request, so aggregationIndex N corresponds to aggregations[N].
-//
-// SAME FIX APPLIES TO RAW/LIST QUERIES: raw queries (requestType: "raw")
-// go through the same ClickHouse-backed query engine as scalar queries and
-// come back in the same `results[0]: { columns, data }` shape — columns
-// named after the selectFields you asked for, data as one array of
-// positional values per row (not per-row keyed objects). See
-// extractRawRows() below, which is the raw-query equivalent of
-// extractScalarValues() — added so signoz-observability.service.ts can
-// stop guessing at response shape entirely and just zip columns to values.
-
 export interface RouteTelemetry {
   service: string;
   method: string;
@@ -940,4 +915,143 @@ export async function runScalarMetricQuerySafe(
     warnings.push(`${label}: ${message}`);
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Container resource metrics (CPU/memory), sourced from SigNoz instead of a
+// local `docker stats` spawn. Requires the docker_stats OTel receiver to be
+// exporting into SigNoz (see otel-collector-config.yaml) — without that,
+// these queries will just return null, same as any other SigNoz query
+// against a signal you haven't ingested yet.
+//
+// https://signoz.io/docs/metrics-management/docker-container-metrics/
+// ---------------------------------------------------------------------------
+
+// Extracts the single scalar value from a runScalarMetricQuery response.
+// Same v5 positional-array response shape as extractScalarValues(), but a
+// metric query only ever has one aggregation/column, so there's no alias
+// list to zip against — just read row[0].
+export function extractScalarMetricValue(raw: unknown): number | null {
+  if (!raw || typeof raw !== "object") return null;
+
+  const results = (raw as Record<string, any>)?.data?.data?.results;
+  if (!Array.isArray(results) || results.length === 0) {
+    debugLog("extractScalarMetricValue: no results[] in response");
+    return null;
+  }
+
+  const rows: unknown[][] | undefined = results[0]?.data;
+  if (!Array.isArray(rows) || rows.length === 0 || !Array.isArray(rows[0])) {
+    debugLog("extractScalarMetricValue: no data row in results[0]");
+    return null;
+  }
+
+  const val = rows[0][0];
+  if (typeof val === "number" && !Number.isNaN(val)) return val;
+  if (typeof val === "string" && val.trim() !== "") {
+    const num = Number(val);
+    return Number.isNaN(num) ? null : num;
+  }
+  return null;
+}
+
+export interface ContainerResourceMetrics {
+  cpuPercent: number;
+  memoryMB: number;
+  memoryPercent: number | null;
+}
+
+// Pulls the latest CPU/memory point for one container out of SigNoz's
+// metrics signal (populated by the docker_stats OTel receiver), instead of
+// shelling out to `docker stats` on the host running the backend.
+//
+// `start`/`end` should be a short trailing window (e.g. last 30s) — we only
+// want the most recent point, not an aggregate over a long range.
+//
+// NOTE on units: per OTel semantic conventions, container.cpu.utilization
+// is typically reported as a 0..N fraction (N = number of cores), NOT a
+// 0-100 percent — hence the *100 below. VERIFY this against a raw panel in
+// SigNoz for your setup (Dashboards → import the container-metrics JSON
+// from the docs) before trusting the number in a demo; if your receiver
+// version reports it differently, drop the *100.
+export async function getContainerMetricsFromSignoz(
+  containerName: string,
+  start: number,
+  end: number,
+): Promise<{ metrics: ContainerResourceMetrics | null; warnings: string[] }> {
+  const warnings: string[] = [];
+  const escapedContainer = containerName.replace(/'/g, "\\'");
+  const filter = `${CONTAINER_NAME_ATTRIBUTE} = '${escapedContainer}'`;
+
+  const cpuAgg: MetricAggregation = {
+    metricName: "container.cpu.utilization",
+    timeAggregation: "latest",
+    spaceAggregation: "avg",
+    reduceTo: "last",
+  };
+  const memPercentAgg: MetricAggregation = {
+    metricName: "container.memory.percent",
+    timeAggregation: "latest",
+    spaceAggregation: "avg",
+    reduceTo: "last",
+  };
+  const memUsageAgg: MetricAggregation = {
+    metricName: "container.memory.usage.total",
+    timeAggregation: "latest",
+    spaceAggregation: "avg",
+    reduceTo: "last",
+  };
+
+  const [cpuRaw, memPercentRaw, memUsageRaw] = await Promise.all([
+    runScalarMetricQuerySafe(
+      start,
+      end,
+      filter,
+      cpuAgg,
+      `container CPU utilization (${containerName})`,
+      warnings,
+    ),
+    runScalarMetricQuerySafe(
+      start,
+      end,
+      filter,
+      memPercentAgg,
+      `container memory percent (${containerName})`,
+      warnings,
+    ),
+    runScalarMetricQuerySafe(
+      start,
+      end,
+      filter,
+      memUsageAgg,
+      `container memory usage bytes (${containerName})`,
+      warnings,
+    ),
+  ]);
+
+  const cpuFraction = extractScalarMetricValue(cpuRaw);
+  const memPercent = extractScalarMetricValue(memPercentRaw);
+  const memUsageBytes = extractScalarMetricValue(memUsageRaw);
+
+  if (cpuFraction === null && memUsageBytes === null) {
+    warnings.push(
+      `No SigNoz metrics found yet for container "${containerName}" — ` +
+        `check the docker_stats OTel receiver is running, the collector has ` +
+        `the docker socket mounted, and container.name matches exactly.`,
+    );
+    return { metrics: null, warnings };
+  }
+
+  return {
+    metrics: {
+      cpuPercent:
+        cpuFraction !== null ? Math.round(cpuFraction * 100 * 100) / 100 : 0,
+      memoryMB:
+        memUsageBytes !== null
+          ? Math.round((memUsageBytes / (1024 * 1024)) * 100) / 100
+          : 0,
+      memoryPercent: memPercent,
+    },
+    warnings,
+  };
 }

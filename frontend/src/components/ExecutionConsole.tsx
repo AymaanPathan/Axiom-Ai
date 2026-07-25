@@ -231,21 +231,7 @@ export default function ExecutionConsole({
           entries.map((entry) => <LogLine key={entry.id} entry={entry} />)
         )}
 
-        {!autoScroll && entries.length > 0 && (
-          <button
-            onClick={jumpToLatest}
-            className="sticky bottom-1 left-full ml-auto flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10.5px] font-medium shadow-lg transition-colors"
-            style={{
-              borderColor: BORDER_STRONG,
-              color: TEXT_PRIMARY,
-              background: "#111111",
-              fontFamily: SANS,
-            }}
-          >
-            <ChevronDown size={11} />
-            Jump to latest
-          </button>
-        )}
+       
       </div>
     </div>
   );

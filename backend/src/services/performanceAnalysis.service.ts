@@ -194,7 +194,6 @@ function detectLoopedDbCall(codeContext: string): StructuralFinding {
   return { found: false };
 }
 
-
 const NODE_BUILTINS = new Set([
   "assert",
   "buffer",
@@ -248,6 +247,40 @@ function extractImportedPackages(code: string): string[] {
     }
   }
   return [...specifiers];
+}
+
+// Heuristic: flags an in-memory cache/store (Map/Set) declared inside a
+// function or loop body rather than at module scope. Tracks brace depth
+// across the newCode snippet; if `new Map(`/`new Set(` appears while
+// depth > 0, it's nested inside something and will be recreated every
+// call — i.e. it isn't actually caching anything.
+function isCacheDeclaredInsideScope(newCode: string): boolean {
+  let depth = 0;
+  const CACHE_CTOR = /\bnew\s+(Map|Set)\s*\(/;
+  for (const line of newCode.split("\n")) {
+    if (CACHE_CTOR.test(line) && depth > 0) return true;
+    for (const ch of line) {
+      if (ch === "{") depth++;
+      else if (ch === "}") depth = Math.max(0, depth - 1);
+    }
+  }
+  return false;
+}
+
+// A Redis-backed caching strategy must isolate connection/client setup into
+// its own created file(s) rather than inlining `createClient`/`new Redis`
+// directly into the modified route/service file — that's what makes it
+// "best code" instead of a quick hack. Flags a strategy that mentions Redis
+// client construction anywhere but never has a "create" change at all.
+const REDIS_CLIENT_CTOR = /createClient\s*\(|new\s+Redis\s*\(/;
+
+function isRedisStrategyMissingFileSplit(changes: RawFileChange[]): boolean {
+  const usesRedisClientCtor = changes.some((c) =>
+    REDIS_CLIENT_CTOR.test(c.newCode ?? ""),
+  );
+  if (!usesRedisClientCtor) return false;
+  const hasCreatedFile = changes.some((c) => c.changeType === "create");
+  return !hasCreatedFile;
 }
 
 function estimateCeiling(
@@ -456,6 +489,7 @@ function buildStrategiesPrompt(
   codeContext: string,
   structural: StructuralFinding,
   knownFilePaths: string[],
+  existingFilePaths: string[],
   knownDependencies: string[],
   knownEnvVars: string[],
   feedback: {
@@ -504,6 +538,9 @@ ${knownFilePaths.map((f) => `- ${f}`).join("\n")}
 ALREADY-INSTALLED NPM DEPENDENCIES (this is the COMPLETE list — nothing else is installed):
 ${knownDependencies.length > 0 ? knownDependencies.map((d) => `- ${d}`).join("\n") : "(none detected)"}
 
+ALL OTHER EXISTING FILES IN THIS REPO (do NOT "create" any of these — they already exist; use "modify" instead, or pick a genuinely new path):
+${existingFilePaths.filter((f) => !knownFilePaths.includes(f)).join("\n")}
+
 ALREADY-CONFIGURED ENV VARS (available at runtime):
 ${knownEnvVars.length > 0 ? knownEnvVars.map((e) => `- ${e}`).join("\n") : "(none)"}
 
@@ -512,13 +549,50 @@ a Node.js builtin (fs, path, crypto, etc.) or a package literally present in the
 You cannot add a package to package.json — nothing gets installed beyond what's already there. A strategy that
 imports an uninstalled package will be discarded outright.
 
-CACHING RULE: default to an in-memory cache (a simple Map or object with a TTL check on read, no dependency
-needed) UNLESS a Redis-family package (redis, ioredis) is ALREADY in the installed-dependencies list above AND
-a Redis-shaped connection env var (e.g. REDIS_URL, REDIS_HOST) is ALREADY in the configured-env-vars list above.
-Only in that case may you propose a real Redis-backed cache — and if you do:
-  - Read connection info from process.env (e.g. process.env.REDIS_URL), never hardcode host/port.
-  - Use the correct current node-redis v4+ API: \`import { createClient } from "redis"; const client = createClient({ url: process.env.REDIS_URL }); await client.connect();\` — never \`new RedisClient()\`, that class does not exist.
-  - Always set a TTL on writes (e.g. \`client.set(key, value, { EX: 60 })\`), never an unbounded cache.
+CACHING RULE: default to an in-memory cache UNLESS a Redis-family package (redis, ioredis) is ALREADY
+in the installed-dependencies list above AND a Redis-shaped connection env var (e.g. REDIS_URL, REDIS_HOST)
+is ALREADY in the configured-env-vars list above.
+
+HARD SCOPE RULE FOR IN-MEMORY CACHES: the cache variable (e.g. \`const cache = new Map()\`) MUST be declared
+at MODULE SCOPE — outside and above any function, handler, or loop — so it persists across requests. NEVER
+declare \`new Map()\`/\`new Set()\` inside a request handler, a loop body, or any function that runs per-request;
+that resets the cache every call and is not caching at all. If the target file has no suitable module-level
+location, use a "create" change to add a small dedicated cache module (e.g. src/utils/cache.ts) exporting
+the Map instance and get/set helpers, then "modify" the target file to import and use it.
+
+Example of a CORRECT in-memory modify diff:
+  // top of file, module scope
+  const productCache = new Map<string, { value: unknown; expiresAt: number }>();
+  const PRODUCT_CACHE_TTL_MS = 60_000;
+  ...
+  // inside the handler/loop — only READS/WRITES the outer cache, never redeclares it
+  const cached = productCache.get(item.productId);
+  const product = cached && cached.expiresAt > Date.now()
+    ? cached.value
+    : await getProductById(String(item.productId)).then((p) => {
+        productCache.set(item.productId, { value: p, expiresAt: Date.now() + PRODUCT_CACHE_TTL_MS });
+        return p;
+      });
+
+REDIS FILE-SPLIT RULE (mandatory whenever the Redis conditions above are met): you MUST produce this strategy
+as MULTIPLE file changes, never a single inline modify. Specifically:
+  1. A "create" change for a dedicated client module, e.g. \`src/lib/redisClient.ts\`, that does ONLY this:
+     - imports \`createClient\` from "redis"
+     - builds the client from \`process.env.REDIS_URL\` (or the detected Redis env var), never hardcoded
+     - connects lazily (connect-on-first-use, memoized promise) or eagerly at module load — pick one and
+       handle connection errors so a Redis outage doesn't crash the whole app, just falls through to a live fetch
+     - exports the client (or a small getClient()/getCached()/setCached() helper) — nothing else lives in this file
+  2. Optionally a second "create" change for a small typed helper module, e.g. \`src/utils/cache.ts\`, wrapping
+     get/set/TTL/JSON-serialization logic on top of the client from (1) — keeps call sites clean.
+  3. A "modify" change on the actual target file that ONLY imports from (1)/(2) and swaps the direct call
+     for a cache-read-through-fallback. It must NOT contain any \`createClient\`, connection logic, or raw
+     Redis calls inline — those belong exclusively in the created file(s).
+  - filePath for the new file(s) MUST NOT already exist in the repo (check ALL OTHER EXISTING FILES above)
+    and MUST NOT collide with another strategy's created files.
+  - Always set a TTL on writes (e.g. \`client.set(key, JSON.stringify(value), { EX: 60 })\`).
+  - Use node-redis v4+ API only: \`createClient({ url: process.env.REDIS_URL })\` + \`await client.connect()\`
+    — never \`new RedisClient()\`, that class doesn't exist.
+  - A single-file inline Redis strategy is INVALID and will be discarded — always split as above.
 ${alreadyAcceptedBlock}${rejectedBlock}
 Respond with ONLY raw JSON, no markdown fences:
 {
@@ -552,7 +626,7 @@ Rules:
 5. Each strategy's estimatedImprovementPercent.max MUST NOT exceed ${estimateCeiling(metrics, structural)}%.
 6. Never call sequential awaits "concurrent". Never claim a loop/N+1 exists unless structural evidence confirms it.
 7. Strategies must be meaningfully different — not the same patch reworded, and not a repeat of an already-accepted strategy above.
-8. Obey the HARD RULE and CACHING RULE above exactly — a violation gets the whole strategy discarded.
+8. Obey the HARD RULE, HARD SCOPE RULE, CACHING RULE, and REDIS FILE-SPLIT RULE above exactly — a violation gets the whole strategy discarded.
 
 ${
   structural.found
@@ -571,7 +645,6 @@ SOURCE:
 ${codeContext.slice(0, MAX_CODE_CONTEXT_CHARS)}
 `;
 }
-
 
 function normalizeChangesKey(changes: FileChange[]): string {
   return changes
@@ -608,6 +681,7 @@ function validateAndBuildStrategy(
   opts: {
     codeContext: string;
     knownFilePaths: string[];
+    existingFilePaths: string[];
     knownDependencies: string[];
   },
   computed: ComputedMetrics,
@@ -631,6 +705,19 @@ function validateAndBuildStrategy(
   }
   if (!raw.estimatedImprovementPercent) {
     rejectedNotes.push(`"${label}" was missing an improvement estimate.`);
+    return null;
+  }
+
+  // Redis strategies must isolate client/connection setup into a created
+  // file — an inline createClient()/new Redis() in a modified route file
+  // is rejected outright rather than shipped as a "quick hack".
+  if (
+    raw.approach === "caching" &&
+    isRedisStrategyMissingFileSplit(raw.changes)
+  ) {
+    rejectedNotes.push(
+      `"${label}" inlined Redis client setup instead of splitting it into a dedicated created file (e.g. src/lib/redisClient.ts).`,
+    );
     return null;
   }
 
@@ -667,6 +754,20 @@ function validateAndBuildStrategy(
       return null;
     }
 
+    // A Map/Set-based in-memory cache declared inside a function or loop
+    // body resets on every call and doesn't cache anything — reject it
+    // rather than ship a no-op cache.
+    if (
+      raw.approach === "caching" &&
+      /new\s+(Map|Set)\s*\(/.test(rc.newCode) &&
+      isCacheDeclaredInsideScope(rc.newCode)
+    ) {
+      rejectedNotes.push(
+        `"${label}" declared its cache inside a function/loop in "${rc.filePath}" instead of module scope — it would reset every call and cache nothing.`,
+      );
+      return null;
+    }
+
     const changeType: FileChangeType =
       rc.changeType === "create" ? "create" : "modify";
 
@@ -698,9 +799,9 @@ function validateAndBuildStrategy(
         unifiedDiff: buildDisplayDiff(rc.filePath, rc.originalCode, rc.newCode),
       });
     } else {
-      if (opts.knownFilePaths.includes(rc.filePath)) {
+      if (opts.existingFilePaths.includes(rc.filePath)) {
         rejectedNotes.push(
-          `"${label}" tried to "create" "${rc.filePath}", but that file already exists — use "modify" instead.`,
+          `"${label}" tried to "create" "${rc.filePath}", but that file already exists in the repo — use "modify" instead.`,
         );
         return null;
       }
@@ -758,7 +859,7 @@ async function callGroqForStrategies(
         {
           role: "system",
           content:
-            "You are a senior performance engineer proposing multiple distinct, real fixes across one or more files, including new files when genuinely useful. You never invent metrics, never mislabel sequential code as concurrent, and every change is a real, minimal, applicable patch against the exact code shown — unique within it. Respond with raw JSON only.",
+            "You are a senior performance engineer proposing multiple distinct, real fixes across one or more files, including new files when genuinely useful. You never invent metrics, never mislabel sequential code as concurrent, and every change is a real, minimal, applicable patch against the exact code shown — unique within it. When a fix needs Redis, you always isolate client/connection setup into its own created file rather than inlining it. Respond with raw JSON only.",
         },
         { role: "user", content: prompt },
       ],
@@ -786,6 +887,7 @@ export async function generateOptimizationStrategies(opts: {
   codeContext: string;
   dbBreakdown?: DbOperationBreakdown[];
   knownFilePaths: string[];
+  existingFilePaths: string[];
   knownDependencies: string[];
   knownEnvVars: string[];
 }): Promise<StrategyGenerationResult> {
@@ -814,6 +916,7 @@ export async function generateOptimizationStrategies(opts: {
       opts.codeContext,
       structural,
       opts.knownFilePaths,
+      opts.existingFilePaths,
       opts.knownDependencies,
       opts.knownEnvVars,
       {
@@ -844,11 +947,13 @@ export async function generateOptimizationStrategies(opts: {
 
     for (const rawStrategy of parsed.strategies ?? []) {
       if (accepted.length >= TARGET_STRATEGY_COUNT) break;
+
       const built = validateAndBuildStrategy(
         rawStrategy,
         {
           codeContext: opts.codeContext,
           knownFilePaths: opts.knownFilePaths,
+          existingFilePaths: opts.existingFilePaths,
           knownDependencies: opts.knownDependencies,
         },
         computed,

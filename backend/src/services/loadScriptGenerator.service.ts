@@ -171,7 +171,7 @@ export function classifyScenario(description: string): ScenarioSpec {
   // to require the number to sit directly next to "at", which never
   // matched real phrasing like "50 requests at a time").
   const atATimeMatch = lower.match(
-    /(\d+)\s*(?:requests?|users?|people)?\s*at\s+(?:the\s+)?same\s+time|(\d+)\s*(?:requests?|users?|people)?\s*at\s+a\s+time/,
+    /(\d+)\s*(?:requests?|users?|people)?\s*at\s+(?:the\s+)?(?:same|a\s+single)\s+time|(\d+)\s*(?:requests?|users?|people)?\s*at\s+a\s+time/,
   );
   // "ramp up to 50 users", "ramp from 0 to 100"
   const rampMatch = /\bramp\b/.test(lower) ? lower.match(/(\d+)/) : null;

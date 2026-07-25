@@ -5,10 +5,13 @@ import { RunModel } from "../models/run.model.js";
 import {
   runScalarTraceQuerySafe,
   extractScalarValues,
+  getContainerMetricsFromSignoz,
   SERVICE_ATTRIBUTE,
   DURATION_ATTRIBUTE,
   nanoToMs,
 } from "./signoz.service.js";
+
+export type ContainerMetricsSource = "signoz" | "docker-cli" | "unavailable";
 
 export interface MetricSnapshot {
   timestamp: number;
@@ -19,6 +22,13 @@ export interface MetricSnapshot {
   p50Ms: number;
   p95Ms: number;
   p99Ms: number;
+  // Where cpuPercent/memoryMB actually came from THIS tick. The frontend
+  // should key its "Live" / SigNoz badge off this, not assume — "signoz"
+  // means it came from SigNoz's metrics signal (docker_stats OTel receiver);
+  // "docker-cli" means SigNoz had no data point yet this tick and we fell
+  // back to a local `docker stats` read; "unavailable" means neither source
+  // returned anything (container may have just stopped).
+  containerMetricsSource: ContainerMetricsSource;
 }
 
 export interface ServiceHealth {
@@ -43,6 +53,24 @@ const AGGREGATE_WINDOW_MS = 60_000; // trailing 60s window for rate/latency calc
 const MAX_HISTORY_POINTS = 180; // ~15 min at 5s interval
 const ERROR_RATE_DEGRADED_THRESHOLD = 0.05; // 5%
 
+// Trailing window we ask SigNoz for on each tick when reading container
+// metrics. Wider than PUSH_INTERVAL_MS on purpose — the docker_stats
+// receiver's own collection_interval (see otel-collector-docker-metrics.yaml,
+// default 5s there) plus normal OTLP export/ingest latency means "give me
+// only the last 5s" can legitimately come back empty even when the receiver
+// is working fine. reduceTo: "last" picks the most recent point inside
+// whatever window we give it, so a wider window just means "don't miss the
+// latest point," not "average over a long range."
+const CONTAINER_METRICS_QUERY_WINDOW_MS = 30_000;
+
+// Whether to fall back to `docker stats` when SigNoz has no container
+// metrics yet for this tick (e.g. receiver cold start, or it's not wired up
+// at all). Set CONTAINER_METRICS_SIGNOZ_ONLY=true in env to disable the
+// fallback entirely and always report "unavailable" instead — useful once
+// you've confirmed the receiver is reliably reporting and want the panel to
+// be strictly honest about SigNoz being the only source.
+const SIGNOZ_ONLY = process.env.CONTAINER_METRICS_SIGNOZ_ONLY === "true";
+
 interface RepoLoopState {
   intervalHandle: NodeJS.Timeout;
   containerName: string;
@@ -53,13 +81,63 @@ interface RepoLoopState {
 
 const loops = new Map<string, RepoLoopState>();
 
-// --- Container resource metrics via `docker stats` ----------------------
+// --- Container resource metrics: SigNoz primary, docker-cli fallback ----
+
+async function getContainerMetricsSignozFirst(containerName: string): Promise<{
+  cpuPercent: number;
+  memoryMB: number;
+  source: ContainerMetricsSource;
+}> {
+  const end = Date.now();
+  const start = end - CONTAINER_METRICS_QUERY_WINDOW_MS;
+
+  const { metrics, warnings } = await getContainerMetricsFromSignoz(
+    containerName,
+    start,
+    end,
+  ).catch((err) => {
+    console.error(
+      `[MetricsObserver] getContainerMetricsFromSignoz(${containerName}) threw:`,
+      err instanceof Error ? err.message : err,
+    );
+    return { metrics: null, warnings: [] as string[] };
+  });
+
+  if (metrics) {
+    return {
+      cpuPercent: metrics.cpuPercent,
+      memoryMB: metrics.memoryMB,
+      source: "signoz",
+    };
+  }
+
+  if (warnings.length > 0) {
+    console.warn(
+      `[MetricsObserver] SigNoz container metrics unavailable for "${containerName}":`,
+      warnings,
+    );
+  }
+
+  if (SIGNOZ_ONLY) {
+    return { cpuPercent: 0, memoryMB: 0, source: "unavailable" };
+  }
+
+  const fallback =
+    await getContainerResourceMetricsFromDockerCli(containerName);
+  if (fallback) {
+    return { ...fallback, source: "docker-cli" };
+  }
+
+  return { cpuPercent: 0, memoryMB: 0, source: "unavailable" };
+}
+
+// --- Fallback: container resource metrics via `docker stats` -----------
 //
-// Queries Docker directly for the one container we actually started —
-// no OTel collector, no receiver config, no attribute-name guessing.
-// `docker stats <name> --no-stream` returns one JSON line for that
-// container's current CPU/memory, which is exactly what we need since we
-// already know containerName from activeRuns.
+// Only used when SigNoz has no data point yet for this container this tick
+// (receiver cold start / not configured). Queries Docker directly for the
+// one container we started — no OTel collector round trip, so it's always
+// available as a last resort, but it is NOT SigNoz telemetry and is tagged
+// as such in every MetricSnapshot.
 
 const DOCKER_STATS_TIMEOUT_MS = 5_000;
 
@@ -90,7 +168,7 @@ function parseMemToMB(raw: string): number {
   return Math.round(value * (multiplierToMB[unit] ?? 1) * 100) / 100;
 }
 
-async function getContainerResourceMetrics(
+async function getContainerResourceMetricsFromDockerCli(
   containerName: string,
 ): Promise<{ cpuPercent: number; memoryMB: number } | null> {
   return new Promise((resolve) => {
@@ -145,7 +223,9 @@ async function getContainerResourceMetrics(
         const cpuPercent =
           parseFloat(String(stat.CPUPerc ?? "0").replace("%", "")) || 0;
         const memUsedRaw =
-          String(stat.MemUsage ?? "0MiB").split("/")[0]?.trim() ?? "0MiB";
+          String(stat.MemUsage ?? "0MiB")
+            .split("/")[0]
+            ?.trim() ?? "0MiB";
         resolve({ cpuPercent, memoryMB: parseMemToMB(memUsedRaw) });
       } catch (err) {
         console.error(
@@ -159,6 +239,7 @@ async function getContainerResourceMetrics(
     });
   });
 }
+
 // --- SigNoz aggregate (whole service, no route filter) ----------------
 
 async function getServiceAggregate(
@@ -232,8 +313,8 @@ export function startMetricsLoop(
     runStartedAt: Date.now(),
     history: [],
     intervalHandle: setInterval(async () => {
-      const [stats, aggregate] = await Promise.all([
-        getContainerResourceMetrics(containerName).catch(() => null),
+      const [containerMetrics, aggregate] = await Promise.all([
+        getContainerMetricsSignozFirst(containerName),
         getServiceAggregate(serviceName, AGGREGATE_WINDOW_MS).catch(() => ({
           requestRate: 0,
           errorRate: 0,
@@ -245,8 +326,9 @@ export function startMetricsLoop(
 
       const snapshot: MetricSnapshot = {
         timestamp: Date.now(),
-        cpuPercent: stats?.cpuPercent ?? 0,
-        memoryMB: stats?.memoryMB ?? 0,
+        cpuPercent: containerMetrics.cpuPercent,
+        memoryMB: containerMetrics.memoryMB,
+        containerMetricsSource: containerMetrics.source,
         ...aggregate,
       };
 
