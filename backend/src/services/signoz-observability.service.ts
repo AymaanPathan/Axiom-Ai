@@ -1,6 +1,7 @@
 import {
   getRouteTelemetry,
   runRawTraceQuerySafe,
+  extractRawRows,
   SERVICE_ATTRIBUTE,
   ROUTE_ATTRIBUTE,
   SEMCONV,
@@ -8,6 +9,7 @@ import {
   nanoToMs,
   type RouteTelemetry,
 } from "./signoz.service.js";
+import { TtlCache } from "./signozCache.service.js";
 
 export interface EndpointMetricResult {
   method: string;
@@ -36,18 +38,46 @@ export interface ErrorEventResult {
   timestamp: number;
 }
 
-// Runs `fn` over `items` with at most `limit` in flight at once — keeps us
-// from firing 20 concurrent query_range calls and tripping SigNoz's
-// "parallel query execution failed" bug (github.com/SigNoz/signoz/issues/11509).
+// --- caching --------------------------------------------------------------
+//
+// SigNoz calls are all funneled through signoz.service.ts's internal
+// enqueueSignozCall queue, which already serializes every fetch to the
+// SigNoz API (that's the real fix for the "parallel query execution
+// failed" bug — github.com/SigNoz/signoz/issues/11509). This cache sits on
+// top of that: it stops repeat panel mounts / tight poll loops from
+// joining that queue at all for data that's still fresh. Endpoint metrics
+// move slower than traces/errors, so it gets a longer TTL.
+const endpointMetricsCache = new TtlCache<EndpointMetricResult[]>(10_000);
+const tracesCache = new TtlCache<{
+  traces: TraceSummaryResult[];
+  warnings: string[];
+}>(5_000);
+const errorsCache = new TtlCache<{
+  errors: ErrorEventResult[];
+  warnings: string[];
+}>(5_000);
+
+/** Call after a fix is applied / container is restarted for a repo, so the
+ * next dashboard read isn't served stale pre-fix numbers out of cache. */
+export function invalidateObservabilityCache(serviceName: string): void {
+  endpointMetricsCache.invalidatePrefix(`${serviceName}:`);
+  tracesCache.invalidatePrefix(`${serviceName}:`);
+  errorsCache.invalidatePrefix(`${serviceName}:`);
+}
+
+// --- concurrency ------------------------------------------------------------
+
+// Runs `fn` over `items` with at most `limit` in flight at once. Belt-and-
+// suspenders alongside signoz.service.ts's own enqueueSignozCall queue:
+// that queue guarantees the actual fetch() calls never overlap regardless
+// of what happens here, but capping how many getRouteTelemetry() calls are
+// *outstanding* at once still bounds memory/log noise for repos with a lot
+// of routes.
 async function mapWithConcurrency<T, R>(
   items: T[],
   limit: number,
   fn: (item: T) => Promise<R>,
 ): Promise<PromiseSettledResult<R>[]> {
-  console.log(
-    `[Observability] mapWithConcurrency: ${items.length} item(s), concurrency=${limit}`,
-  );
-
   const results: PromiseSettledResult<R>[] = new Array(items.length);
   let cursor = 0;
 
@@ -80,185 +110,149 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-const SIGNOZ_QUERY_CONCURRENCY = 1;
+const SIGNOZ_QUERY_CONCURRENCY = 4;
+
+// One retry on a transient failure before giving up on a single route's
+// telemetry — SigNoz's query_range path has a documented history of
+// intermittent 5xxs under its own internal parallelism bugs (see
+// github.com/SigNoz/signoz/issues/11509), so a lone route failing on its
+// first attempt shouldn't drop it from the dashboard if a second attempt
+// 300ms later would have succeeded.
+async function withOneRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    await new Promise((r) => setTimeout(r, 300));
+    return fn();
+  }
+}
 
 export async function getEndpointMetrics(
   serviceName: string,
   routes: { method: string; routePath: string }[],
   windowMinutes = 15,
 ): Promise<EndpointMetricResult[]> {
-  console.log(
-    `[Observability] getEndpointMetrics(${serviceName}): ${routes.length} route(s), window=${windowMinutes}min`,
-  );
+  const cacheKey = `${serviceName}:endpoints:${windowMinutes}:${routes
+    .map((r) => `${r.method} ${r.routePath}`)
+    .join(",")}`;
 
-  const end = Date.now();
-  const start = end - windowMinutes * 60 * 1000;
+  return endpointMetricsCache.getOrFetch(cacheKey, async () => {
+    const end = Date.now();
+    const start = end - windowMinutes * 60 * 1000;
 
-  const results = await mapWithConcurrency(
-    routes,
-    SIGNOZ_QUERY_CONCURRENCY,
-    (r) => getRouteTelemetry(serviceName, r.method, r.routePath, start, end),
-  );
-
-  const fulfilled = results.filter(
-    (r): r is PromiseFulfilledResult<RouteTelemetry> =>
-      r.status === "fulfilled",
-  );
-
-  if (fulfilled.length < routes.length) {
-    console.warn(
-      `[Observability] getEndpointMetrics(${serviceName}): only ${fulfilled.length}/${routes.length} route(s) returned telemetry`,
+    const results = await mapWithConcurrency(
+      routes,
+      SIGNOZ_QUERY_CONCURRENCY,
+      (r) =>
+        withOneRetry(() =>
+          getRouteTelemetry(serviceName, r.method, r.routePath, start, end),
+        ),
     );
-  }
 
-  const metrics = fulfilled
-    .map((r) => r.value)
-    .map((t) => ({
-      method: t.method,
-      routePath: t.routePath,
-      requestCount: t.requestCount,
-      errorCount: t.errorCount,
-      avgLatencyMs: t.latencyMs.avg,
-      p95Ms: t.latencyMs.p95,
-    }));
+    const fulfilled = results.filter(
+      (r): r is PromiseFulfilledResult<RouteTelemetry> =>
+        r.status === "fulfilled",
+    );
 
-  console.log(
-    `[Observability] getEndpointMetrics(${serviceName}): returning ${metrics.length} metric(s)`,
-  );
+    if (fulfilled.length < routes.length) {
+      console.warn(
+        `[Observability] getEndpointMetrics(${serviceName}): only ${fulfilled.length}/${routes.length} route(s) returned telemetry`,
+      );
+    }
 
-  return metrics;
+    return fulfilled
+      .map((r) => r.value)
+      .map((t) => ({
+        method: t.method,
+        routePath: t.routePath,
+        requestCount: t.requestCount,
+        errorCount: t.errorCount,
+        avgLatencyMs: t.latencyMs.avg,
+        p95Ms: t.latencyMs.p95,
+      }));
+  });
 }
 
-// Best-effort tree walk for raw list rows. SigNoz v5 raw-query responses
-// nest row data under a `data` key per record — this looks for any object
-// whose keys (or its `data` sub-object's keys) cover the fields we asked
-// for, and collects those as rows.
-function extractRows(
-  node: unknown,
-  requiredFieldHints: string[],
+// De-duplicate by traceID/spanID pair — SigNoz's query_range path has a
+// confirmed, still-open bug where the same span can be returned more than
+// once for a given filter (github.com/SigNoz/signoz/issues/10449). The
+// trace-detail UI works around this with SELECT DISTINCT ON (span_id); we
+// do the client-side equivalent since we go through query_range directly.
+function dedupeRows(
+  rows: Record<string, unknown>[],
 ): Record<string, unknown>[] {
-  const rows: Record<string, unknown>[] = [];
-
-  function looksLikeRow(obj: Record<string, unknown>): boolean {
-    const keys = Object.keys(obj).map((k) => k.toLowerCase());
-    return requiredFieldHints.every((hint) =>
-      keys.some((k) => k.includes(hint.toLowerCase())),
-    );
+  const seen = new Set<string>();
+  const out: Record<string, unknown>[] = [];
+  for (const row of rows) {
+    const spanId = String(row["spanID"] ?? "");
+    const traceId = String(row["traceID"] ?? "");
+    const key = spanId ? `${traceId}:${spanId}` : JSON.stringify(row);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(row);
   }
-
-  function walk(n: unknown) {
-    if (n === null || n === undefined) return;
-    if (Array.isArray(n)) {
-      for (const item of n) walk(item);
-      return;
-    }
-    if (typeof n === "object") {
-      const obj = n as Record<string, unknown>;
-      const candidate =
-        obj.data && typeof obj.data === "object"
-          ? (obj.data as Record<string, unknown>)
-          : obj;
-      if (looksLikeRow(candidate)) {
-        rows.push(candidate);
-      }
-      for (const value of Object.values(obj)) walk(value);
-    }
-  }
-
-  walk(node);
-
-  console.log(
-    `[Observability] extractRows: hints=${JSON.stringify(requiredFieldHints)} -> found ${rows.length} row(s)`,
-  );
-  if (rows.length === 0 && node !== null && node !== undefined) {
-    // This is the case most likely to indicate a response-shape mismatch —
-    // dump the top-level keys we actually saw to help diagnose it.
-    console.warn(
-      "[Observability] extractRows: no rows matched. Top-level node was:",
-      JSON.stringify(node).slice(0, 800),
-    );
-  }
-  if (rows.length > 0) {
-    console.log(
-      "[Observability] extractRows: sample row keys:",
-      Object.keys(rows[0]),
-    );
-  }
-
-  return rows;
+  return out;
 }
 
-function pick(row: Record<string, unknown>, hint: string): unknown {
-  const match = Object.entries(row).find(([k]) =>
-    k.toLowerCase().includes(hint.toLowerCase()),
-  );
-  return match?.[1];
-}
+const METHOD_FIELD = SEMCONV.method; // "httpMethod" — same constant getRouteTelemetry filters on
 
 export async function getRecentTraces(
   serviceName: string,
   windowMinutes = 15,
   limit = 20,
 ): Promise<{ traces: TraceSummaryResult[]; warnings: string[] }> {
-  console.log(
-    `[Observability] getRecentTraces(${serviceName}): window=${windowMinutes}min, limit=${limit}`,
-  );
+  const cacheKey = `${serviceName}:traces:${windowMinutes}:${limit}`;
 
-  const end = Date.now();
-  const start = end - windowMinutes * 60 * 1000;
-  const warnings: string[] = [];
-  const escapedService = serviceName.replace(/'/g, "\\'");
+  return tracesCache.getOrFetch(cacheKey, async () => {
+    const end = Date.now();
+    const start = end - windowMinutes * 60 * 1000;
+    const warnings: string[] = [];
+    const escapedService = serviceName.replace(/'/g, "\\'");
 
-  const raw = await runRawTraceQuerySafe(
-    start,
-    end,
-    `${SERVICE_ATTRIBUTE} = '${escapedService}' AND ${ROUTE_ATTRIBUTE} EXISTS`,
-    [
-      "traceID",
-      "spanID",
-      SEMCONV.method,
-      ROUTE_ATTRIBUTE,
-      DURATION_ATTRIBUTE,
-      "hasError",
-      "timestamp",
-    ],
-    limit,
-    "recent traces (raw list)",
-    warnings,
-  );
-
-  if (raw === null) {
-    console.error(
-      `[Observability] getRecentTraces(${serviceName}): raw query failed, returning empty result. warnings:`,
+    const raw = await runRawTraceQuerySafe(
+      start,
+      end,
+      `${SERVICE_ATTRIBUTE} = '${escapedService}' AND ${ROUTE_ATTRIBUTE} EXISTS`,
+      [
+        "traceID",
+        "spanID",
+        METHOD_FIELD,
+        ROUTE_ATTRIBUTE,
+        DURATION_ATTRIBUTE,
+        "hasError",
+        "timestamp",
+      ],
+      limit,
+      "recent traces (raw list)",
       warnings,
     );
-    return { traces: [], warnings };
-  }
 
-  const rows = extractRows(raw, ["traceid", "durationnano"]);
-  if (rows.length === 0) {
-    const msg =
-      "recent traces: query succeeded but extractRows() found no matching rows — response shape needs verification, see SIGNOZ_DEBUG output";
-    warnings.push(msg);
-    console.warn(`[Observability] getRecentTraces(${serviceName}): ${msg}`);
-  }
+    if (raw === null) {
+      console.error(
+        `[Observability] getRecentTraces(${serviceName}): raw query failed, returning empty result. warnings:`,
+        warnings,
+      );
+      return { traces: [], warnings };
+    }
 
-  const traces: TraceSummaryResult[] = rows.map((row) => ({
-    traceId: String(pick(row, "traceid") ?? ""),
-    method: String(
-      pick(row, SEMCONV.method.split(".").pop() ?? "method") ?? "",
-    ),
-    routePath: String(pick(row, "route") ?? ""),
-    durationMs: nanoToMs(Number(pick(row, "duration") ?? 0)),
-    status: pick(row, "haserror") === true ? "error" : "ok",
-    timestamp: Number(pick(row, "timestamp") ?? Date.now()),
-  }));
+    const rows = dedupeRows(extractRawRows(raw));
+    if (rows.length === 0) {
+      const msg =
+        "recent traces: query succeeded but returned zero rows — check the service name and that traffic exists in this window";
+      warnings.push(msg);
+    }
 
-  console.log(
-    `[Observability] getRecentTraces(${serviceName}): returning ${traces.length} trace(s), ${warnings.length} warning(s)`,
-  );
+    const traces: TraceSummaryResult[] = rows.map((row) => ({
+      traceId: String(row["traceID"] ?? ""),
+      method: String(row[METHOD_FIELD] ?? ""),
+      routePath: String(row[ROUTE_ATTRIBUTE] ?? ""),
+      durationMs: nanoToMs(Number(row[DURATION_ATTRIBUTE] ?? 0)),
+      status: row["hasError"] === true ? "error" : "ok",
+      timestamp: Number(row["timestamp"] ?? Date.now()),
+    }));
 
-  return { traces, warnings };
+    return { traces, warnings };
+  });
 }
 
 export async function getRecentErrors(
@@ -266,70 +260,63 @@ export async function getRecentErrors(
   windowMinutes = 15,
   limit = 20,
 ): Promise<{ errors: ErrorEventResult[]; warnings: string[] }> {
-  console.log(
-    `[Observability] getRecentErrors(${serviceName}): window=${windowMinutes}min, limit=${limit}`,
-  );
+  const cacheKey = `${serviceName}:errors:${windowMinutes}:${limit}`;
 
-  const end = Date.now();
-  const start = end - windowMinutes * 60 * 1000;
-  const warnings: string[] = [];
-  const escapedService = serviceName.replace(/'/g, "\\'");
+  return errorsCache.getOrFetch(cacheKey, async () => {
+    const end = Date.now();
+    const start = end - windowMinutes * 60 * 1000;
+    const warnings: string[] = [];
+    const escapedService = serviceName.replace(/'/g, "\\'");
 
-  const raw = await runRawTraceQuerySafe(
-    start,
-    end,
-    `${SERVICE_ATTRIBUTE} = '${escapedService}' AND hasError = true`,
-    [
-      "traceID",
-      "spanID",
-      SEMCONV.method,
-      ROUTE_ATTRIBUTE,
-      "timestamp",
-      "statusMessage",
-      "exception.message",
-      "exception.stacktrace",
-    ],
-    limit,
-    "recent errors (raw list)",
-    warnings,
-  );
-
-  if (raw === null) {
-    console.error(
-      `[Observability] getRecentErrors(${serviceName}): raw query failed, returning empty result. warnings:`,
+    const raw = await runRawTraceQuerySafe(
+      start,
+      end,
+      `${SERVICE_ATTRIBUTE} = '${escapedService}' AND hasError = true`,
+      [
+        "traceID",
+        "spanID",
+        METHOD_FIELD,
+        ROUTE_ATTRIBUTE,
+        "timestamp",
+        "statusMessage",
+        "exception.message",
+        "exception.stacktrace",
+      ],
+      limit,
+      "recent errors (raw list)",
       warnings,
     );
-    return { errors: [], warnings };
-  }
 
-  const rows = extractRows(raw, ["traceid"]);
-  if (rows.length === 0) {
-    const msg =
-      "recent errors: query succeeded but extractRows() found no matching rows — response shape needs verification, see SIGNOZ_DEBUG output";
-    warnings.push(msg);
-    console.warn(`[Observability] getRecentErrors(${serviceName}): ${msg}`);
-  }
+    if (raw === null) {
+      console.error(
+        `[Observability] getRecentErrors(${serviceName}): raw query failed, returning empty result. warnings:`,
+        warnings,
+      );
+      return { errors: [], warnings };
+    }
 
-  const errors: ErrorEventResult[] = rows.map((row) => ({
-    id: String(pick(row, "spanid") ?? pick(row, "traceid") ?? Math.random()),
-    message: String(
-      pick(row, "exception.message") ??
-        pick(row, "statusmessage") ??
-        "Unknown error",
-    ),
-    routePath: pick(row, "route") ? String(pick(row, "route")) : undefined,
-    method: pick(row, SEMCONV.method.split(".").pop() ?? "method")
-      ? String(pick(row, SEMCONV.method.split(".").pop() ?? "method"))
-      : undefined,
-    stack: pick(row, "exception.stacktrace")
-      ? String(pick(row, "exception.stacktrace"))
-      : undefined,
-    timestamp: Number(pick(row, "timestamp") ?? Date.now()),
-  }));
+    const rows = dedupeRows(extractRawRows(raw));
+    if (rows.length === 0) {
+      const msg =
+        "recent errors: query succeeded but returned zero rows — check the service name and that errors exist in this window";
+      warnings.push(msg);
+    }
 
-  console.log(
-    `[Observability] getRecentErrors(${serviceName}): returning ${errors.length} error(s), ${warnings.length} warning(s)`,
-  );
+    const errors: ErrorEventResult[] = rows.map((row) => ({
+      id: String(row["spanID"] ?? row["traceID"] ?? Math.random()),
+      message: String(
+        row["exception.message"] ?? row["statusMessage"] ?? "Unknown error",
+      ),
+      routePath: row[ROUTE_ATTRIBUTE]
+        ? String(row[ROUTE_ATTRIBUTE])
+        : undefined,
+      method: row[METHOD_FIELD] ? String(row[METHOD_FIELD]) : undefined,
+      stack: row["exception.stacktrace"]
+        ? String(row["exception.stacktrace"])
+        : undefined,
+      timestamp: Number(row["timestamp"] ?? Date.now()),
+    }));
 
-  return { errors, warnings };
+    return { errors, warnings };
+  });
 }

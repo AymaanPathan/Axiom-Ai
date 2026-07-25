@@ -13,6 +13,15 @@
 // Fix: extract by position. The order of the "columns"/"data" arrays in
 // the response matches the order of the `aggregations` array you sent in
 // the request, so aggregationIndex N corresponds to aggregations[N].
+//
+// SAME FIX APPLIES TO RAW/LIST QUERIES: raw queries (requestType: "raw")
+// go through the same ClickHouse-backed query engine as scalar queries and
+// come back in the same `results[0]: { columns, data }` shape — columns
+// named after the selectFields you asked for, data as one array of
+// positional values per row (not per-row keyed objects). See
+// extractRawRows() below, which is the raw-query equivalent of
+// extractScalarValues() — added so signoz-observability.service.ts can
+// stop guessing at response shape entirely and just zip columns to values.
 
 export interface RouteTelemetry {
   service: string;
@@ -613,6 +622,47 @@ export function extractScalarValues(
   });
 
   return result;
+}
+
+// Extracts EVERY row from a SigNoz v5 raw/list response, keyed by the exact
+// column names the response reports — which match the `selectFields` you
+// requested, since you control the query. This is the raw-query counterpart
+// to extractScalarValues() above: same `results[0]: { columns, data }`
+// positional shape, just N rows instead of 1.
+//
+// Response shape (raw/list, N rows):
+//   { status, data: { data: { results: [ { columns: [{name, ...}, ...], data: [[v0, v1, ...], [v0, v1, ...], ...] } ] } } }
+//
+// Because this zips against `columns[i].name` rather than guessing at
+// nesting, callers can index results with the exact strings they passed to
+// selectFields (e.g. row["traceID"], row["http.route"]) — no fuzzy
+// substring matching needed.
+export function extractRawRows(raw: unknown): Record<string, unknown>[] {
+  if (!raw || typeof raw !== "object") return [];
+
+  const results = (raw as Record<string, any>)?.data?.data?.results;
+  if (!Array.isArray(results) || results.length === 0) {
+    debugLog("extractRawRows: no results[] in response");
+    return [];
+  }
+
+  const columns: { name: string }[] = results[0]?.columns ?? [];
+  const dataRows: unknown[][] = results[0]?.data;
+
+  if (columns.length === 0 || !Array.isArray(dataRows)) {
+    debugLog("extractRawRows: missing columns[] or data[] in results[0]");
+    return [];
+  }
+
+  return dataRows
+    .filter((row): row is unknown[] => Array.isArray(row))
+    .map((row) => {
+      const obj: Record<string, unknown> = {};
+      columns.forEach((col, i) => {
+        obj[col.name] = row[i];
+      });
+      return obj;
+    });
 }
 
 export function nanoToMs(nano: number | null): number {

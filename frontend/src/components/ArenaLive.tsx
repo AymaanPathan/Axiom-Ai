@@ -1,21 +1,28 @@
 // components/ArenaLive.tsx
 //
-// The Optimization Arena as an actual execution workspace, not a page of
-// cards. Three strategies run CONCURRENTLY the moment the arena is ready —
-// nobody has to click "Run" three times. Each strategy is a lane on a real
-// canvas (react-flow): Strategy → Live Telemetry → Metrics → Result, wired
-// left to right. Once all three finish, their Result nodes wire INTO a
-// fourth node — Synthesis — which is the arena's actual verdict: the best
-// measured outcome across all three, not just a list.
+// The Optimization Arena as an execution workspace. Three strategies run
+// CONCURRENTLY the moment the arena is ready. Each strategy is a lane on a
+// canvas (react-flow): Strategy → Metrics → Result, wired left to right.
+// Once all three finish, their Result nodes wire into a fourth node —
+// Synthesis — the arena's verdict.
 //
-// A scenario banner up top translates the raw k6 script into plain
-// English ("10 concurrent for 30s") so every graph in every lane has a
-// stated frame of reference — otherwise the numbers float with no context
-// for what load actually produced them.
-//
-// Click any node to open the inspector drawer on the right for the deep
-// dive (full diff, console, request table, gauges). The canvas itself
-// only shows what you need to read the state of the room at a glance.
+// v3 — redesign notes:
+// - Palette: white + a single yellow accent, done as thin edges/badges/rings
+//   rather than large tinted fills, so nothing reads as a cream background.
+//   Ink for text, functional red reserved only for failure states.
+// - FIXED: node positions used to be recomputed from scratch on every data
+//   tick (live metrics stream in every few hundred ms), which silently
+//   snapped any dragged node back to its default slot — this is what looked
+//   like "the workflow disappears / refreshes." Positions now live in
+//   react-flow's own node state and are only ever merged with fresh data,
+//   never overwritten.
+// - FIXED: "Open full report" is now the whole Synthesis card's click
+//   target once it's ready (not just a small inner button), so there's no
+//   chance of the click being swallowed by the node's own drag handling.
+// - Every node is draggable. Interactive controls inside nodes carry the
+//   `nodrag nopan` classes react-flow expects.
+// - Fewer things competing for attention per card: one hero metric per
+//   node, secondary detail lives in the inspector drawer on click.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ReactFlow,
@@ -24,12 +31,11 @@ import {
   BackgroundVariant,
   Controls,
   MiniMap,
-  Panel,
   Handle,
   Position,
   BaseEdge,
   getBezierPath,
-  useReactFlow,
+  useNodesState,
   type Node,
   type Edge,
   type NodeProps,
@@ -52,7 +58,6 @@ import {
   Gauge,
   Database,
   Check,
-  Terminal,
   X,
   Clock,
   ChevronDown,
@@ -70,6 +75,7 @@ import {
   Flag,
   Layers,
   Crown,
+  ArrowRight,
 } from "lucide-react";
 import {
   AreaChart,
@@ -98,30 +104,6 @@ import {
   useArenaStream,
   type CandidateLiveState,
 } from "../hooks/useArenaStream";
-import {
-  MONO,
-  SANS,
-  BG,
-  SURFACE,
-  SURFACE_RAISED,
-  SURFACE_SUNKEN,
-  BORDER,
-  BORDER_STRONG,
-  TEXT_PRIMARY,
-  TEXT_SECONDARY,
-  TEXT_TERTIARY,
-  TEXT_QUIET,
-  ERROR,
-  ERROR_SOFT,
-  GOLD,
-  ACCENT_SOFT,
-  LIVE,
-  LIVE_SOFT,
-  CONSOLE_BG,
-  CONSOLE_BORDER,
-  CONSOLE_TEXT,
-  CONSOLE_TEXT_DIM,
-} from "../theme";
 
 interface Props {
   repositoryId: string;
@@ -130,25 +112,60 @@ interface Props {
   strategies: OptimizationStrategy[];
   script: string;
   authToken?: string;
-  // The plain-language scenario the user typed into the composer (e.g.
-  // "100 concurrent users checking out for 30 seconds"). Shown alongside
-  // the parsed k6 parameters in the scenario banner so every metric in
-  // every lane has a stated frame of reference.
   description?: string;
   onClose: () => void;
   onComplete?: (result: ArenaResult) => void;
 }
 
 // ---------------------------------------------------------------------------
-// Shared status vocabulary — every node/edge in the canvas reduces to one
-// of these four states, and color always means the same thing everywhere.
+// Design tokens — white canvas, a single yellow accent used thinly (rings,
+// hairlines, small badges), neutral ink-grays everywhere else. Red is
+// reserved strictly for failure states.
+// ---------------------------------------------------------------------------
+const SANS =
+  '"Inter", ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif';
+const MONO =
+  '"JetBrains Mono", "IBM Plex Mono", ui-monospace, "SF Mono", monospace';
+
+const BG = "#FFFFFF";
+const CANVAS = "#FBFBFC";
+const SURFACE = "#F6F6F7";
+const SURFACE_HOVER = "#EFEFF1";
+const BORDER = "#E9E9EB";
+const BORDER_STRONG = "#D9D9DC";
+const INK = "#101113";
+const TEXT_PRIMARY = "#17181C";
+const TEXT_SECONDARY = "#6C6C74";
+const TEXT_TERTIARY = "#9799A1";
+const TEXT_QUIET = "#C3C4C9";
+
+const YELLOW = "#F0B429";
+const YELLOW_DEEP = "#8A6200";
+const YELLOW_TINT = "#FFF9EB";
+const YELLOW_RING = "rgba(240,180,41,0.20)";
+
+const ERROR = "#E5484D";
+const ERROR_SOFT = "#FFF1F1";
+const ERROR_TEXT = "#C5282D";
+
+const CONSOLE_BG = "#0B0B0D";
+const CONSOLE_BORDER = "#232326";
+const CONSOLE_TEXT = "#E5E5E8";
+const CONSOLE_TEXT_DIM = "#606067";
+
+const SHADOW_REST = "0 1px 2px rgba(15,15,20,0.04)";
+const SHADOW_HOVER = "0 8px 24px rgba(15,15,20,0.08)";
+const SHADOW_SELECTED = `0 0 0 3px ${YELLOW_RING}, 0 8px 20px rgba(15,15,20,0.08)`;
+
+// ---------------------------------------------------------------------------
+// Status vocabulary — one of four states, one meaning, everywhere.
 // ---------------------------------------------------------------------------
 type NodeStatus = "idle" | "active" | "done" | "failed";
 
 function statusColor(s: NodeStatus) {
   if (s === "failed") return ERROR;
-  if (s === "done") return LIVE;
-  if (s === "active") return GOLD;
+  if (s === "done") return INK;
+  if (s === "active") return YELLOW;
   return BORDER_STRONG;
 }
 
@@ -205,7 +222,7 @@ function fmtElapsed(ms: number): string {
   return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
 }
 
-const RANK_COLOR = [GOLD, "#9A97A8", "#C98A4D"];
+const RANK_COLOR = [YELLOW_DEEP, TEXT_TERTIARY, "#B07A3E"];
 
 const TOOLTIP_STYLE = {
   background: CONSOLE_BG,
@@ -213,15 +230,11 @@ const TOOLTIP_STYLE = {
   borderRadius: 8,
   fontSize: 11,
   fontFamily: MONO,
-  color: TEXT_SECONDARY,
+  color: CONSOLE_TEXT,
 };
 
 // ---------------------------------------------------------------------------
-// Scenario parsing — turns the raw k6 script into a few plain-language
-// facts (concurrency, duration, iterations) so the banner and the strategy
-// cards can say "10 concurrent, 30s" instead of leaving the user to infer
-// it from a JS options block. Best-effort/regex-based: any field that
-// doesn't match is simply omitted rather than guessed at.
+// Scenario parsing
 // ---------------------------------------------------------------------------
 interface LoadScenario {
   vus: number | null;
@@ -249,28 +262,32 @@ function scenarioChips(scenario: LoadScenario): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// Layout — three fixed lanes, five columns. Nothing is draggable; this is
-// a status board, not a diagramming tool.
+// Layout — three columns per lane. Positions computed here are only ever
+// DEFAULTS for a node's first appearance; once a node exists in react-flow's
+// state, dragging it is what wins (see the merge effect in the main
+// component). Generous gutters between columns so lanes don't feel packed.
 // ---------------------------------------------------------------------------
 const COL_STRATEGY = 40;
-const COL_TELEMETRY = 460;
-const COL_METRICS = 880;
-const COL_RESULT = 1300;
-const COL_SYNTHESIS = 1620;
+const COL_METRICS = 420;
+const COL_RESULT = 860;
+const COL_SYNTHESIS = 1180;
 const LANE_H = 300;
 const LANE_TOP = 40;
 
 const NODE_W = {
-  strategy: 380,
-  telemetry: 380,
-  metrics: 380,
-  result: 280,
-  synthesis: 320,
+  strategy: 300,
+  metrics: 360,
+  result: 200,
+  synthesis: 300,
 };
 
+// Interactive children of a react-flow node need this so clicks reach React
+// instead of being swallowed by the node's own drag/pan handling.
+const NODRAG = "nodrag nopan";
+
 // ===========================================================================
-// Custom edge — a bezier wire that only "runs" (animated flowing dot) while
-// data is genuinely moving between the two nodes it connects.
+// Edge — a thin wire that only "runs" (animated dot) while data is
+// genuinely moving between the two nodes it connects.
 // ===========================================================================
 function FlowEdge({
   id,
@@ -291,7 +308,7 @@ function FlowEdge({
     targetX,
     targetY,
     targetPosition,
-    curvature: 0.35,
+    curvature: 0.28,
   });
   return (
     <>
@@ -300,13 +317,13 @@ function FlowEdge({
         path={path}
         style={{
           stroke: color,
-          strokeWidth: status === "idle" ? 1.5 : 2,
-          opacity: status === "idle" ? 0.35 : 0.85,
+          strokeWidth: status === "idle" ? 1.25 : 1.75,
+          opacity: status === "idle" ? 0.35 : 0.9,
         }}
       />
       {status === "active" && (
-        <circle r="3.5" fill={color}>
-          <animateMotion dur="1.4s" repeatCount="indefinite" path={path} />
+        <circle r="3" fill={color}>
+          <animateMotion dur="1.3s" repeatCount="indefinite" path={path} />
         </circle>
       )}
     </>
@@ -316,9 +333,59 @@ function FlowEdge({
 const edgeTypes: EdgeTypes = { flow: FlowEdge };
 
 // ===========================================================================
-// Node — Strategy (merged header + pipeline stepper). This is the "engine"
-// of the lane: what's being tried, and exactly which of the six real steps
-// it's on right now.
+// Shared node shell — every card in the canvas uses this so elevation,
+// radius, and border logic live in exactly one place.
+// ===========================================================================
+function NodeShell({
+  width,
+  selected,
+  accent,
+  dimmed,
+  highlight,
+  onClick,
+  children,
+}: {
+  width: number;
+  selected: boolean;
+  accent: string;
+  dimmed?: boolean;
+  highlight?: boolean;
+  onClick?: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className="arena-node"
+      onClick={onClick}
+      style={{
+        width,
+        borderRadius: 10,
+        border: `1px solid ${selected ? accent : highlight ? YELLOW : BORDER}`,
+        borderWidth: selected || highlight ? 1.5 : 1,
+        background: BG,
+        boxShadow: selected ? SHADOW_SELECTED : SHADOW_REST,
+        cursor: onClick ? "grab" : "default",
+        overflow: "hidden",
+        opacity: dimmed ? 0.55 : 1,
+      }}
+    >
+      {highlight && (
+        <div style={{ height: 3, background: YELLOW, width: "100%" }} />
+      )}
+      {children}
+    </div>
+  );
+}
+
+const handleStyle = {
+  background: BORDER_STRONG,
+  border: `1.5px solid ${BG}`,
+  width: 7,
+  height: 7,
+};
+
+// ===========================================================================
+// Node — Strategy
 // ===========================================================================
 interface StrategyNodeData {
   index: number;
@@ -346,21 +413,11 @@ function StrategyNode({ data }: NodeProps) {
   const color = statusColor(status);
 
   return (
-    <div
-      className="arena-node"
+    <NodeShell
+      width={NODE_W.strategy}
+      selected={d.selected}
+      accent={color}
       onClick={d.onSelect}
-      style={{
-        width: NODE_W.strategy,
-        borderRadius: 16,
-        border: `1px solid ${d.selected ? color : BORDER}`,
-        borderWidth: d.selected ? 2 : 1,
-        background: BG,
-        boxShadow: d.selected
-          ? `0 0 0 3px ${status === "failed" ? ERROR_SOFT : ACCENT_SOFT}, 0 8px 24px rgba(20,17,0,0.06)`
-          : "0 1px 2px rgba(20,17,0,0.04)",
-        cursor: "pointer",
-        overflow: "hidden",
-      }}
     >
       <Handle type="source" position={Position.Right} style={handleStyle} />
 
@@ -369,34 +426,36 @@ function StrategyNode({ data }: NodeProps) {
         style={{ borderColor: BORDER }}
       >
         <span
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[11px] font-bold"
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10.5px] font-bold"
           style={{
             border: `1.5px solid ${color}`,
-            color,
-            background: status === "active" ? ACCENT_SOFT : "transparent",
-            animation:
+            color: status === "active" ? YELLOW_DEEP : color,
+            background:
               status === "active"
-                ? "arenaPulse 1.6s ease-in-out infinite"
-                : undefined,
+                ? YELLOW_TINT
+                : status === "done"
+                  ? INK
+                  : "transparent",
+            ...(status === "done" ? { color: "#fff", borderColor: INK } : {}),
           }}
         >
           {status === "done" ? (
-            <Check size={13} />
+            <Check size={12} />
           ) : status === "failed" ? (
-            <XCircle size={13} />
+            <XCircle size={12} />
           ) : (
             d.index + 1
           )}
         </span>
         <div className="min-w-0 flex-1">
           <div
-            className="truncate text-[13.5px] font-semibold"
+            className="truncate text-[13px] font-semibold"
             style={{ color: TEXT_PRIMARY, fontFamily: MONO }}
           >
             {strategy.title}
           </div>
           <div
-            className="flex items-center gap-1.5 text-[10.5px] font-medium uppercase tracking-[0.05em]"
+            className="truncate text-[10px] font-medium uppercase tracking-[0.05em]"
             style={{ color: TEXT_QUIET }}
           >
             {strategy.approach}
@@ -404,7 +463,7 @@ function StrategyNode({ data }: NodeProps) {
         </div>
         {status === "active" && (
           <span
-            className="shrink-0 text-[11px] font-semibold tabular-nums"
+            className="shrink-0 text-[10.5px] font-semibold tabular-nums"
             style={{ color: TEXT_TERTIARY, fontFamily: MONO }}
           >
             {fmtElapsed(elapsed)}
@@ -418,18 +477,18 @@ function StrategyNode({ data }: NodeProps) {
             {d.scenarioChips.map((chip) => (
               <span
                 key={chip}
-                className="rounded-full px-2 py-0.5 text-[9.5px] font-bold uppercase tracking-[0.03em]"
-                style={{ background: SURFACE_SUNKEN, color: TEXT_TERTIARY }}
+                className="rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.03em]"
+                style={{ background: SURFACE, color: TEXT_TERTIARY }}
               >
                 {chip}
               </span>
             ))}
           </div>
         )}
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <span
-            className="text-[12px] font-medium"
-            style={{ color: status === "failed" ? ERROR : TEXT_SECONDARY }}
+            className="truncate text-[11.5px] font-medium"
+            style={{ color: status === "failed" ? ERROR_TEXT : TEXT_SECONDARY }}
           >
             {status === "idle"
               ? "Queued to start"
@@ -440,8 +499,8 @@ function StrategyNode({ data }: NodeProps) {
                   : STAGE_MESSAGE[stage]}
           </span>
           <span
-            className="rounded-full px-1.5 py-0.5 text-[10px] font-bold"
-            style={{ background: SURFACE_SUNKEN, color: TEXT_QUIET }}
+            className="shrink-0 rounded-full px-1.5 py-0.5 text-[9.5px] font-bold"
+            style={{ background: SURFACE, color: TEXT_QUIET }}
           >
             +{strategy.estimatedImprovementPercent.min}–
             {strategy.estimatedImprovementPercent.max}%
@@ -450,22 +509,12 @@ function StrategyNode({ data }: NodeProps) {
 
         <div className="mt-3 flex items-center gap-[3px]">
           {PIPELINE_STAGES.map((p, i) => (
-            <div key={p.stage} className="group flex-1">
-              <div
-                className="h-[6px] rounded-full"
-                style={{
-                  background: i < pipeDone ? color : SURFACE_SUNKEN,
-                }}
-              />
-            </div>
+            <div
+              key={p.stage}
+              className="h-[4px] flex-1 rounded-full"
+              style={{ background: i < pipeDone ? color : SURFACE }}
+            />
           ))}
-        </div>
-        <div
-          className="mt-1.5 flex justify-between text-[9px] font-semibold uppercase tracking-[0.04em]"
-          style={{ color: TEXT_QUIET }}
-        >
-          <span>{PIPELINE_STAGES[0].label}</span>
-          <span>{PIPELINE_STAGES[PIPELINE_STAGES.length - 1].label}</span>
         </div>
 
         {(status === "idle" || status === "failed") && (
@@ -475,203 +524,25 @@ function StrategyNode({ data }: NodeProps) {
               if (d.canRun) d.onRun();
             }}
             disabled={!d.canRun}
-            className="mt-3.5 flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[11.5px] font-bold transition-all hover:brightness-105 disabled:opacity-40"
-            style={{ background: GOLD, color: "#241C00" }}
+            className={`${NODRAG} mt-3.5 flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[11.5px] font-bold transition-all hover:brightness-[1.03] active:scale-[0.98] disabled:opacity-40`}
+            style={{
+              background: status === "failed" ? ERROR : YELLOW,
+              color: status === "failed" ? "#fff" : INK,
+            }}
           >
             {status === "failed" ? <RotateCcw size={12} /> : <Play size={12} />}
             {status === "failed" ? "Retry strategy" : "Run strategy"}
           </button>
         )}
       </div>
-    </div>
+    </NodeShell>
   );
 }
 
 // ===========================================================================
-// Node — Live Telemetry. Status-and-pulse card: is this candidate alive
-// right now, and what's the last thing it logged. The deep numeric/graph
-// story now lives one hop further right, in the dedicated Metrics node —
-// this card stays a lightweight "is it breathing" readout.
-// ===========================================================================
-interface TelemetryNodeData {
-  live?: CandidateLiveState;
-  status: NodeStatus;
-  selected: boolean;
-  onSelect: () => void;
-}
-
-function Sparkline({ data, color }: { data: number[]; color: string }) {
-  const chartData = useMemo(() => data.map((v, i) => ({ i, v })), [data]);
-  if (chartData.length < 2) {
-    return (
-      <div
-        className="flex h-9 items-center text-[10px]"
-        style={{ color: TEXT_QUIET }}
-      >
-        sampling…
-      </div>
-    );
-  }
-  return (
-    <ResponsiveContainer width="100%" height={36}>
-      <AreaChart data={chartData}>
-        <YAxis hide domain={["auto", "auto"]} />
-        <Area
-          type="monotone"
-          dataKey="v"
-          stroke={color}
-          fill={color}
-          fillOpacity={0.14}
-          strokeWidth={1.5}
-          isAnimationActive={false}
-        />
-      </AreaChart>
-    </ResponsiveContainer>
-  );
-}
-
-function TelemetryNode({ data }: NodeProps) {
-  const d = data as unknown as TelemetryNodeData;
-  const { live, status } = d;
-  const color = statusColor(status);
-  const lastLog = live?.logs[live.logs.length - 1];
-  const latestMetric = live?.metrics[live.metrics.length - 1];
-  const reqCount = live?.requestLog.length ?? 0;
-  const errCount = (live?.requestLog ?? []).filter((r) => !r.ok).length;
-
-  return (
-    <div
-      className="arena-node"
-      onClick={d.onSelect}
-      style={{
-        width: NODE_W.telemetry,
-        borderRadius: 16,
-        border: `1px solid ${d.selected ? color : BORDER}`,
-        borderWidth: d.selected ? 2 : 1,
-        background: BG,
-        boxShadow: d.selected
-          ? `0 0 0 3px ${ACCENT_SOFT}, 0 8px 24px rgba(20,17,0,0.06)`
-          : "0 1px 2px rgba(20,17,0,0.04)",
-        cursor: "pointer",
-        opacity: status === "idle" ? 0.5 : 1,
-      }}
-    >
-      <Handle type="target" position={Position.Left} style={handleStyle} />
-      <Handle type="source" position={Position.Right} style={handleStyle} />
-
-      <div
-        className="flex items-center justify-between border-b px-4 py-2.5"
-        style={{ borderColor: BORDER }}
-      >
-        <span
-          className="flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-[0.06em]"
-          style={{ color: TEXT_TERTIARY }}
-        >
-          <Activity
-            size={12}
-            style={{ color: status === "active" ? LIVE : TEXT_QUIET }}
-          />
-          Live telemetry
-        </span>
-        {status === "active" && (
-          <span
-            className="flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase"
-            style={{ background: LIVE_SOFT, color: LIVE }}
-          >
-            <span
-              className="h-1.5 w-1.5 rounded-full"
-              style={{
-                background: LIVE,
-                animation: "arenaPulse 1.4s ease-in-out infinite",
-              }}
-            />
-            live
-          </span>
-        )}
-      </div>
-
-      <div className="px-4 py-3">
-        <div className="grid grid-cols-3 gap-2">
-          <MiniReadout
-            icon={Cpu}
-            label="CPU"
-            value={
-              latestMetric ? `${Math.round(latestMetric.cpuPercent)}%` : "—"
-            }
-          />
-          <MiniReadout
-            icon={MemoryStick}
-            label="Mem"
-            value={
-              latestMetric ? `${Math.round(latestMetric.memoryMB)}MB` : "—"
-            }
-          />
-          <MiniReadout
-            icon={TrendingUp}
-            label="Reqs"
-            value={String(reqCount)}
-            accent={errCount > 0 ? ERROR : undefined}
-          />
-        </div>
-
-        <div
-          className="mt-3 truncate rounded-lg px-2.5 py-1.5 text-[10.5px]"
-          style={{
-            background: CONSOLE_BG,
-            border: `1px solid ${CONSOLE_BORDER}`,
-            color: lastLog ? CONSOLE_TEXT : CONSOLE_TEXT_DIM,
-            fontFamily: MONO,
-          }}
-        >
-          {lastLog ? lastLog.slice(0, 54) : "waiting for output…"}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function MiniReadout({
-  icon: Icon,
-  label,
-  value,
-  accent,
-}: {
-  icon: typeof Cpu;
-  label: string;
-  value: string;
-  accent?: string;
-}) {
-  return (
-    <div
-      className="rounded-lg px-2 py-1.5 text-center"
-      style={{ background: SURFACE_RAISED }}
-    >
-      <div
-        className="flex items-center justify-center gap-1"
-        style={{ color: TEXT_QUIET }}
-      >
-        <Icon size={10} />
-        <span className="text-[9px] font-semibold uppercase tracking-[0.04em]">
-          {label}
-        </span>
-      </div>
-      <div
-        className="mt-0.5 text-[12.5px] font-bold"
-        style={{ color: accent ?? TEXT_PRIMARY, fontFamily: MONO }}
-      >
-        {value}
-      </div>
-    </div>
-  );
-}
-
-// ===========================================================================
-// Node — Metrics. The real per-strategy dashboard: a live latency line, a
-// throughput bar chart bucketed per second, and CPU/memory readouts, all
-// scoped to whatever scenario the user actually asked for (shown in the
-// header, e.g. "Metrics — 10 concurrent"). Clicking it opens the same
-// inspector drawer as Telemetry — the deep-dive gauges, console, and
-// request table live there, this node is the "read the room" view.
+// Node — Metrics. One hero chart (latency) plus a compact stat row. The
+// throughput breakdown, telemetry, console and request log all live in the
+// inspector drawer on click — keeps the card scannable at a glance.
 // ===========================================================================
 interface MetricsNodeData {
   scenario: LoadScenario;
@@ -695,47 +566,25 @@ function MetricsNode({ data }: NodeProps) {
     [live?.requestLog],
   );
 
-  const throughputData = useMemo(() => {
-    const entries = live?.requestLog ?? [];
-    if (entries.length === 0) return [];
-    const buckets = new Map<number, number>();
-    for (const r of entries) {
-      const sec = Math.floor(r.timestamp / 1000);
-      buckets.set(sec, (buckets.get(sec) ?? 0) + 1);
-    }
-    const keys = [...buckets.keys()].sort((a, b) => a - b);
-    return keys.map((k, i) => ({ i, rps: buckets.get(k)! }));
-  }, [live?.requestLog]);
-
   const latestMetric = live?.metrics[live.metrics.length - 1];
   const lastLog = live?.logs[live.logs.length - 1];
   const chips = scenarioChips(scenario);
+  const reqCount = live?.requestLog.length ?? 0;
+  const errCount = (live?.requestLog ?? []).filter((r) => !r.ok).length;
 
   const avgLatency = result?.runResult
     ? Math.round(result.runResult.avgDurationMs)
     : latencyData.length
       ? Math.round(latencyData[latencyData.length - 1].latency)
       : null;
-  const latestThroughput = throughputData.length
-    ? throughputData[throughputData.length - 1].rps
-    : null;
 
   return (
-    <div
-      className="arena-node"
+    <NodeShell
+      width={NODE_W.metrics}
+      selected={d.selected}
+      accent={color}
+      dimmed={status === "idle"}
       onClick={d.onSelect}
-      style={{
-        width: NODE_W.metrics,
-        borderRadius: 16,
-        border: `1px solid ${d.selected ? color : BORDER}`,
-        borderWidth: d.selected ? 2 : 1,
-        background: BG,
-        boxShadow: d.selected
-          ? `0 0 0 3px ${ACCENT_SOFT}, 0 8px 24px rgba(20,17,0,0.06)`
-          : "0 1px 2px rgba(20,17,0,0.04)",
-        cursor: "pointer",
-        opacity: status === "idle" ? 0.5 : 1,
-      }}
     >
       <Handle type="target" position={Position.Left} style={handleStyle} />
       <Handle type="source" position={Position.Right} style={handleStyle} />
@@ -745,59 +594,31 @@ function MetricsNode({ data }: NodeProps) {
         style={{ borderColor: BORDER }}
       >
         <span
-          className="flex min-w-0 items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-[0.06em]"
+          className="flex min-w-0 items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.06em]"
           style={{ color: TEXT_TERTIARY }}
         >
           <Gauge
             size={12}
-            style={{ color: status === "active" ? LIVE : TEXT_QUIET }}
+            style={{ color: status === "active" ? YELLOW_DEEP : TEXT_QUIET }}
           />
           <span className="truncate">
-            Metrics{chips.length > 0 ? ` — ${chips[0]}` : ""}
+            Metrics{chips.length > 0 ? ` · ${chips[0]}` : ""}
           </span>
         </span>
-        {status === "active" && (
-          <span
-            className="flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase"
-            style={{ background: LIVE_SOFT, color: LIVE }}
-          >
-            <span
-              className="h-1.5 w-1.5 rounded-full"
-              style={{
-                background: LIVE,
-                animation: "arenaPulse 1.4s ease-in-out infinite",
-              }}
-            />
-            live
-          </span>
-        )}
+        {status === "active" && <PulseTag />}
       </div>
 
       <div className="px-4 py-3">
-        {chips.length > 1 && (
-          <div className="mb-2.5 flex flex-wrap items-center gap-1.5">
-            {chips.slice(1).map((chip) => (
-              <span
-                key={chip}
-                className="rounded-full px-2 py-0.5 text-[9.5px] font-bold uppercase tracking-[0.03em]"
-                style={{ background: SURFACE_SUNKEN, color: TEXT_TERTIARY }}
-              >
-                {chip}
-              </span>
-            ))}
-          </div>
-        )}
-
         <div
-          className="mb-1 flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.05em]"
+          className="mb-1 flex items-center justify-between text-[9.5px] font-semibold uppercase tracking-[0.05em]"
           style={{ color: TEXT_QUIET }}
         >
-          <span>Latency / request</span>
+          <span>Latency</span>
           <span style={{ color: TEXT_SECONDARY, fontFamily: MONO }}>
             {avgLatency != null ? `${avgLatency}ms` : "—"}
           </span>
         </div>
-        <div className="h-[60px]">
+        <div className="h-[68px]">
           {latencyData.length > 1 ? (
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={latencyData}>
@@ -810,61 +631,20 @@ function MetricsNode({ data }: NodeProps) {
                 <Area
                   type="monotone"
                   dataKey="latency"
-                  stroke={GOLD}
-                  fill={GOLD}
-                  fillOpacity={0.16}
+                  stroke={YELLOW_DEEP}
+                  fill={YELLOW}
+                  fillOpacity={0.12}
                   strokeWidth={1.5}
                   isAnimationActive={false}
                 />
               </AreaChart>
             </ResponsiveContainer>
           ) : (
-            <div
-              className="flex h-full items-center text-[11px]"
-              style={{ color: TEXT_QUIET }}
-            >
-              Plots as each request finishes…
-            </div>
+            <EmptyChartHint text="Plots as requests finish…" />
           )}
         </div>
 
-        <div
-          className="mt-3 mb-1 flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.05em]"
-          style={{ color: TEXT_QUIET }}
-        >
-          <span>Throughput</span>
-          <span style={{ color: TEXT_SECONDARY, fontFamily: MONO }}>
-            {latestThroughput != null ? `${latestThroughput} req/s` : "—"}
-          </span>
-        </div>
-        <div className="h-[52px]">
-          {throughputData.length > 1 ? (
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={throughputData}>
-                <YAxis hide domain={[0, "auto"]} />
-                <Tooltip
-                  contentStyle={TOOLTIP_STYLE}
-                  formatter={(v: number) => [`${v}`, "req/s"]}
-                />
-                <Bar
-                  dataKey="rps"
-                  fill={LIVE}
-                  radius={[2, 2, 0, 0]}
-                  isAnimationActive={false}
-                />
-              </BarChart>
-            </ResponsiveContainer>
-          ) : (
-            <div
-              className="flex h-full items-center text-[11px]"
-              style={{ color: TEXT_QUIET }}
-            >
-              Bucketing requests/sec…
-            </div>
-          )}
-        </div>
-
-        <div className="mt-3 grid grid-cols-2 gap-2">
+        <div className="mt-3 grid grid-cols-3 gap-1.5">
           <MiniReadout
             icon={Cpu}
             label="CPU"
@@ -879,10 +659,16 @@ function MetricsNode({ data }: NodeProps) {
               latestMetric ? `${Math.round(latestMetric.memoryMB)}MB` : "—"
             }
           />
+          <MiniReadout
+            icon={TrendingUp}
+            label="Reqs"
+            value={String(reqCount)}
+            accent={errCount > 0 ? ERROR_TEXT : undefined}
+          />
         </div>
 
         <div
-          className="mt-3 truncate rounded-lg px-2.5 py-1.5 text-[10.5px]"
+          className="mt-2.5 truncate rounded-lg px-2.5 py-1.5 text-[10px]"
           style={{
             background: CONSOLE_BG,
             border: `1px solid ${CONSOLE_BORDER}`,
@@ -890,15 +676,79 @@ function MetricsNode({ data }: NodeProps) {
             fontFamily: MONO,
           }}
         >
-          {lastLog ? lastLog.slice(0, 58) : "waiting for log output…"}
+          {lastLog ? lastLog.slice(0, 60) : "waiting for output…"}
         </div>
+      </div>
+    </NodeShell>
+  );
+}
+
+function PulseTag() {
+  return (
+    <span
+      className="flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase"
+      style={{ background: YELLOW_TINT, color: YELLOW_DEEP }}
+    >
+      <span
+        className="h-1.5 w-1.5 rounded-full"
+        style={{
+          background: YELLOW,
+          animation: "arenaPulse 1.4s ease-in-out infinite",
+        }}
+      />
+      live
+    </span>
+  );
+}
+
+function EmptyChartHint({ text }: { text: string }) {
+  return (
+    <div
+      className="flex h-full items-center text-[10.5px]"
+      style={{ color: TEXT_QUIET }}
+    >
+      {text}
+    </div>
+  );
+}
+
+function MiniReadout({
+  icon: Icon,
+  label,
+  value,
+  accent,
+}: {
+  icon: typeof Cpu;
+  label: string;
+  value: string;
+  accent?: string;
+}) {
+  return (
+    <div
+      className="rounded-lg px-1.5 py-1.5 text-center"
+      style={{ background: SURFACE }}
+    >
+      <div
+        className="flex items-center justify-center gap-1"
+        style={{ color: TEXT_QUIET }}
+      >
+        <Icon size={9} />
+        <span className="text-[8.5px] font-semibold uppercase tracking-[0.04em]">
+          {label}
+        </span>
+      </div>
+      <div
+        className="mt-0.5 text-[11.5px] font-bold"
+        style={{ color: accent ?? TEXT_PRIMARY, fontFamily: MONO }}
+      >
+        {value}
       </div>
     </div>
   );
 }
 
 // ===========================================================================
-// Node — Result. The scorecard for one lane.
+// Node — Result
 // ===========================================================================
 interface ResultNodeData {
   strategy: OptimizationStrategy;
@@ -915,116 +765,108 @@ function ResultNode({ data }: NodeProps) {
   const color = statusColor(status);
 
   return (
-    <div
-      className="arena-node"
+    <NodeShell
+      width={NODE_W.result}
+      selected={d.selected}
+      accent={color}
+      dimmed={status === "idle" || status === "active"}
+      highlight={isWinner}
       onClick={d.onSelect}
-      style={{
-        width: NODE_W.result,
-        borderRadius: 16,
-        border: `1px solid ${isWinner ? GOLD : d.selected ? color : BORDER}`,
-        borderWidth: isWinner || d.selected ? 2 : 1,
-        background: isWinner ? "#FFFBEE" : BG,
-        boxShadow: d.selected
-          ? `0 0 0 3px ${ACCENT_SOFT}, 0 8px 24px rgba(20,17,0,0.06)`
-          : "0 1px 2px rgba(20,17,0,0.04)",
-        cursor: "pointer",
-        opacity: status === "idle" || status === "active" ? 0.45 : 1,
-        padding: "16px",
-        textAlign: "center",
-      }}
     >
       <Handle type="target" position={Position.Left} style={handleStyle} />
       <Handle type="source" position={Position.Right} style={handleStyle} />
 
-      {isWinner && (
-        <div
-          className="mb-2 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9.5px] font-bold uppercase tracking-[0.05em]"
-          style={{ background: GOLD, color: "#241C00" }}
-        >
-          <Crown size={10} /> Leading
-        </div>
-      )}
-
-      {!result ? (
-        <div className="py-3">
-          <span className="text-[11.5px]" style={{ color: TEXT_QUIET }}>
-            Awaiting benchmark…
-          </span>
-        </div>
-      ) : result.status === "failed" ? (
-        <div className="flex flex-col items-center gap-1 py-2">
-          <XCircle size={18} style={{ color: ERROR }} />
-          <span
-            className="text-[11.5px] font-semibold"
-            style={{ color: ERROR }}
-          >
-            Run failed
-          </span>
-        </div>
-      ) : (
-        <>
+      <div className="px-4 py-4 text-center">
+        {isWinner && (
           <div
-            className="text-[26px] font-black leading-none"
-            style={{ color: TEXT_PRIMARY, fontFamily: MONO }}
+            className="mb-2 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.05em]"
+            style={{ background: YELLOW, color: INK }}
           >
-            {result.runResult
-              ? Math.round(result.runResult.avgDurationMs)
-              : "—"}
+            <Crown size={10} /> Leading
+          </div>
+        )}
+
+        {!result ? (
+          <div className="py-3">
+            <span className="text-[11px]" style={{ color: TEXT_QUIET }}>
+              Awaiting benchmark…
+            </span>
+          </div>
+        ) : result.status === "failed" ? (
+          <div className="flex flex-col items-center gap-1 py-2">
+            <XCircle size={17} style={{ color: ERROR }} />
             <span
-              className="text-[13px] font-semibold"
+              className="text-[11px] font-semibold"
+              style={{ color: ERROR_TEXT }}
+            >
+              Run failed
+            </span>
+          </div>
+        ) : (
+          <>
+            <div
+              className="text-[24px] font-black leading-none"
+              style={{ color: TEXT_PRIMARY, fontFamily: MONO }}
+            >
+              {result.runResult
+                ? Math.round(result.runResult.avgDurationMs)
+                : "—"}
+              <span
+                className="text-[12px] font-semibold"
+                style={{ color: TEXT_QUIET }}
+              >
+                ms
+              </span>
+            </div>
+            <div
+              className="text-[9.5px] font-semibold uppercase tracking-[0.05em]"
               style={{ color: TEXT_QUIET }}
             >
-              ms
-            </span>
-          </div>
-          <div
-            className="text-[10px] font-semibold uppercase tracking-[0.05em]"
-            style={{ color: TEXT_QUIET }}
-          >
-            avg latency
-          </div>
-          <div
-            className="mt-2.5 flex items-center justify-center gap-3 text-[11px]"
-            style={{ fontFamily: MONO, color: TEXT_TERTIARY }}
-          >
-            <span>
-              p95{" "}
-              {result.runResult?.p95DurationMs != null
-                ? `${Math.round(result.runResult.p95DurationMs)}ms`
-                : "—"}
-            </span>
-            <span style={{ color: BORDER_STRONG }}>·</span>
-            <span
+              avg latency
+            </div>
+            <div
+              className="mt-2 flex items-center justify-center gap-3 text-[10.5px]"
+              style={{ fontFamily: MONO, color: TEXT_TERTIARY }}
+            >
+              <span>
+                p95{" "}
+                {result.runResult?.p95DurationMs != null
+                  ? `${Math.round(result.runResult.p95DurationMs)}ms`
+                  : "—"}
+              </span>
+              <span style={{ color: BORDER_STRONG }}>·</span>
+              <span
+                style={{
+                  color:
+                    result.runResult && result.runResult.errorCount > 0
+                      ? ERROR_TEXT
+                      : TEXT_TERTIARY,
+                }}
+              >
+                {result.runResult?.errorCount ?? 0} err
+              </span>
+            </div>
+            <div
+              className="mt-2.5 rounded-lg py-1.5 text-[12.5px] font-bold"
               style={{
-                color:
-                  result.runResult && result.runResult.errorCount > 0
-                    ? ERROR
-                    : TEXT_TERTIARY,
+                background: isWinner ? YELLOW : SURFACE,
+                color: isWinner ? INK : TEXT_PRIMARY,
+                fontFamily: MONO,
               }}
             >
-              {result.runResult?.errorCount ?? 0} err
-            </span>
-          </div>
-          <div
-            className="mt-2.5 rounded-lg py-1.5 text-[13px] font-bold"
-            style={{
-              background: isWinner ? GOLD : SURFACE_RAISED,
-              color: isWinner ? "#241C00" : TEXT_PRIMARY,
-              fontFamily: MONO,
-            }}
-          >
-            score {result.score ?? "—"}
-          </div>
-        </>
-      )}
-    </div>
+              score {result.score ?? "—"}
+            </div>
+          </>
+        )}
+      </div>
+    </NodeShell>
   );
 }
 
 // ===========================================================================
-// Node — Synthesis. The point of running three strategies at once: not a
-// list, a verdict. Fed by all three Result nodes; dim and waiting until
-// they've all reported in, then resolves into the arena's actual answer.
+// Node — Synthesis. The verdict node. The whole card is the click target
+// for opening the full report once it's ready — no small nested button to
+// lose a click to the node's own drag handling.
 // ===========================================================================
 interface SynthesisNodeData {
   strategies: OptimizationStrategy[];
@@ -1057,147 +899,149 @@ function SynthesisNode({ data }: NodeProps) {
 
   return (
     <div
+      className={d.ready ? NODRAG : ""}
+      onClick={() => {
+        if (d.ready) d.onOpenReport();
+      }}
+      role={d.ready ? "button" : undefined}
       style={{
         width: NODE_W.synthesis,
-        borderRadius: 18,
-        border: `1.5px solid ${d.ready ? GOLD : BORDER}`,
-        background: d.ready
-          ? "linear-gradient(165deg, #FFFBEA, #FFF7D6)"
-          : SURFACE,
-        boxShadow: d.ready
-          ? "0 12px 32px rgba(245,196,0,0.16)"
-          : "0 1px 2px rgba(20,17,0,0.04)",
-        opacity: d.ready ? 1 : 0.55,
-        padding: "20px",
+        borderRadius: 12,
+        border: `1px solid ${d.ready ? YELLOW : BORDER}`,
+        borderWidth: d.ready ? 1.5 : 1,
+        background: BG,
+        boxShadow: d.ready ? SHADOW_HOVER : SHADOW_REST,
+        opacity: d.ready ? 1 : 0.65,
+        overflow: "hidden",
+        cursor: d.ready ? "pointer" : "grab",
+        transition: "box-shadow 140ms ease, opacity 200ms ease",
       }}
     >
       <Handle type="target" position={Position.Left} style={handleStyle} />
 
-      <div className="flex items-center gap-2">
-        <div
-          className="flex h-8 w-8 items-center justify-center rounded-full"
-          style={{ background: d.ready ? GOLD : SURFACE_SUNKEN }}
-        >
-          <Trophy
-            size={14}
-            style={{ color: d.ready ? "#241C00" : TEXT_QUIET }}
-          />
-        </div>
-        <div>
-          <div
-            className="text-[10.5px] font-bold uppercase tracking-[0.06em]"
-            style={{ color: TEXT_TERTIARY }}
-          >
-            Synthesis
-          </div>
-          <div
-            className="text-[13px] font-semibold"
-            style={{ color: TEXT_PRIMARY }}
-          >
-            {d.ready
-              ? "Best measured outcome"
-              : `Waiting on ${d.totalCount - completed.length} of ${d.totalCount}`}
-          </div>
-        </div>
-      </div>
-
-      {d.ready && winnerStrategy ? (
-        <div className="mt-4">
-          <div
-            className="truncate text-[14px] font-bold"
-            style={{ color: TEXT_PRIMARY, fontFamily: MONO }}
-          >
-            {winnerStrategy.title}
-          </div>
-          <p
-            className="mt-1 text-[11.5px] leading-[1.5]"
-            style={{ color: TEXT_SECONDARY }}
-          >
-            Fastest and cheapest of the {completed.length} measured — chosen on
-            latency, p95, CPU, and memory together, not latency alone.
-          </p>
-
-          <div className="mt-3 flex items-end gap-2">
-            {d.strategies.map((s) => {
-              const r = d.results[s.id];
-              const isWinner = s.id === d.winnerStrategyId;
-              const score = r?.score ?? 0;
-              const maxScore = Math.max(
-                ...completed.map((c) => c.score ?? 0),
-                1,
-              );
-              const h = Math.max(6, (score / maxScore) * 44);
-              return (
-                <div
-                  key={s.id}
-                  className="flex flex-1 flex-col items-center gap-1"
-                >
-                  <div
-                    className="w-full rounded-t-md"
-                    style={{
-                      height: h,
-                      background: isWinner ? GOLD : BORDER_STRONG,
-                    }}
-                  />
-                  <span
-                    className="text-[9px] font-bold"
-                    style={{ color: isWinner ? "#8A6D00" : TEXT_QUIET }}
-                  >
-                    {s.id}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-
-          {improvementVsWorst != null && improvementVsWorst > 0 && (
-            <div
-              className="mt-3 inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-bold"
-              style={{ background: GOLD, color: "#241C00" }}
-            >
-              <Sparkles size={11} /> {improvementVsWorst}% faster than the
-              slowest run
-            </div>
-          )}
-
-          <button
-            onClick={d.onOpenReport}
-            className="mt-3.5 flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-[11.5px] font-bold transition-colors"
-            style={{ borderColor: "#8A6D00", color: "#8A6D00" }}
-          >
-            Open full report <ExternalLink size={11} />
-          </button>
-        </div>
-      ) : (
-        <p className="mt-3 text-[11.5px]" style={{ color: TEXT_QUIET }}>
-          Resolves the moment every lane reports a result — combining latency,
-          error rate, CPU, and memory into one verdict.
-        </p>
+      {d.ready && (
+        <div style={{ height: 3, background: YELLOW, width: "100%" }} />
       )}
+
+      <div className="px-[18px] py-[18px]">
+        <div className="flex items-center gap-2">
+          <div
+            className="flex h-8 w-8 items-center justify-center rounded-full"
+            style={{ background: d.ready ? YELLOW_TINT : SURFACE }}
+          >
+            <Trophy
+              size={14}
+              style={{ color: d.ready ? YELLOW_DEEP : TEXT_QUIET }}
+            />
+          </div>
+          <div>
+            <div
+              className="text-[10px] font-bold uppercase tracking-[0.06em]"
+              style={{ color: TEXT_TERTIARY }}
+            >
+              Synthesis
+            </div>
+            <div
+              className="text-[12.5px] font-semibold"
+              style={{ color: TEXT_PRIMARY }}
+            >
+              {d.ready
+                ? "Best measured outcome"
+                : `Waiting on ${d.totalCount - completed.length} of ${d.totalCount}`}
+            </div>
+          </div>
+        </div>
+
+        {d.ready && winnerStrategy ? (
+          <div className="mt-3.5">
+            <div
+              className="truncate text-[13.5px] font-bold"
+              style={{ color: TEXT_PRIMARY, fontFamily: MONO }}
+            >
+              {winnerStrategy.title}
+            </div>
+            <p
+              className="mt-1 text-[11px] leading-[1.5]"
+              style={{ color: TEXT_SECONDARY }}
+            >
+              Fastest and cheapest of the {completed.length} measured — scored
+              on latency, p95, CPU, and memory together.
+            </p>
+
+            <div className="mt-3 flex items-end gap-2">
+              {d.strategies.map((s) => {
+                const r = d.results[s.id];
+                const isWinner = s.id === d.winnerStrategyId;
+                const score = r?.score ?? 0;
+                const maxScore = Math.max(
+                  ...completed.map((c) => c.score ?? 0),
+                  1,
+                );
+                const h = Math.max(6, (score / maxScore) * 40);
+                return (
+                  <div
+                    key={s.id}
+                    className="flex flex-1 flex-col items-center gap-1"
+                  >
+                    <div
+                      className="w-full rounded-t-md"
+                      style={{
+                        height: h,
+                        background: isWinner ? YELLOW : BORDER_STRONG,
+                      }}
+                    />
+                    <span
+                      className="text-[9px] font-bold"
+                      style={{ color: isWinner ? YELLOW_DEEP : TEXT_QUIET }}
+                    >
+                      {s.id}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            {improvementVsWorst != null && improvementVsWorst > 0 && (
+              <div
+                className="mt-3 inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[10.5px] font-bold"
+                style={{ background: INK, color: "#fff" }}
+              >
+                <Sparkles size={10} /> {improvementVsWorst}% faster than the
+                slowest run
+              </div>
+            )}
+
+            <div
+              className="mt-3.5 flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[11.5px] font-bold"
+              style={{
+                border: `1.5px solid ${YELLOW_DEEP}`,
+                color: YELLOW_DEEP,
+                background: BG,
+              }}
+            >
+              Open full report <ArrowRight size={11} />
+            </div>
+          </div>
+        ) : (
+          <p className="mt-3 text-[11px]" style={{ color: TEXT_QUIET }}>
+            Resolves the moment every lane reports a result — combining latency,
+            error rate, CPU, and memory into one verdict.
+          </p>
+        )}
+      </div>
     </div>
   );
 }
 
-const handleStyle = {
-  background: "transparent",
-  border: "none",
-  width: 1,
-  height: 1,
-};
-
 const nodeTypes: NodeTypes = {
   strategy: StrategyNode,
-  telemetry: TelemetryNode,
   metrics: MetricsNode,
   result: ResultNode,
   synthesis: SynthesisNode,
 };
 
 // ---------------------------------------------------------------------------
-// Scenario banner — sits above the canvas, restating what the user asked
-// for ("100 concurrent users checking out for 30 seconds") next to the
-// parsed k6 parameters, so every graph in every lane has a stated frame of
-// reference instead of floating numbers with no context.
+// Scenario banner
 // ---------------------------------------------------------------------------
 function ScenarioBanner({
   description,
@@ -1212,33 +1056,34 @@ function ScenarioBanner({
     <div className="relative z-20 px-6 pt-3">
       <div
         className="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-xl border px-4 py-2.5"
-        style={{ borderColor: BORDER_STRONG, background: SURFACE }}
+        style={{ borderColor: BORDER, background: BG }}
       >
         <span
-          className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.06em]"
+          className="flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-[0.06em]"
           style={{ color: TEXT_TERTIARY }}
         >
           <Flag size={12} /> Scenario
         </span>
         {description && (
-          <span className="text-[12.5px]" style={{ color: TEXT_SECONDARY }}>
+          <span className="text-[12px]" style={{ color: TEXT_SECONDARY }}>
             "{description}"
           </span>
         )}
         {chips.map((chip) => (
           <span
             key={chip}
-            className="rounded-full border px-2 py-0.5 text-[11px] font-semibold"
+            className="rounded-full border px-2 py-0.5 text-[10.5px] font-semibold"
             style={{
               borderColor: BORDER_STRONG,
               color: TEXT_PRIMARY,
               fontFamily: MONO,
+              background: BG,
             }}
           >
             {chip}
           </span>
         ))}
-        <span className="ml-auto text-[11px]" style={{ color: TEXT_QUIET }}>
+        <span className="ml-auto text-[10.5px]" style={{ color: TEXT_QUIET }}>
           Every graph below measures this same scenario, once per strategy.
         </span>
       </div>
@@ -1279,7 +1124,7 @@ export default function ArenaLive({
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedKind, setSelectedKind] = useState<
-    "strategy" | "telemetry" | "result" | null
+    "strategy" | "metrics" | "result" | null
   >(null);
   const [reportOpen, setReportOpen] = useState(false);
 
@@ -1338,8 +1183,6 @@ export default function ArenaLive({
     [arenaId, repositoryId, script, authToken],
   );
 
-  // Launch every strategy the instant the arena is ready — the whole point
-  // is that they run AT THE SAME TIME. No queueing on a single "running" flag.
   const autoStartedRef = useRef(false);
   useEffect(() => {
     if (autoStartedRef.current) return;
@@ -1352,8 +1195,6 @@ export default function ArenaLive({
   const testedCount = strategies.filter((s) => completedResults[s.id]).length;
   const allTested = testedCount === strategies.length;
 
-  // Auto-finalize the instant every lane has reported — the synthesis node
-  // resolves on its own, no "click to see who won" gate.
   const finalizedRef = useRef(false);
   useEffect(() => {
     if (finalizedRef.current || !allTested || !arenaId || finalResult) return;
@@ -1384,20 +1225,15 @@ export default function ArenaLive({
   );
   const runningCount = runningIds.size;
 
-  // ---- build react-flow graph -------------------------------------------
   const winnerStrategyId = finalResult?.winnerStrategyId ?? null;
 
-  // The layout is fixed (nothing is draggable), so the canvas bounds are
-  // knowable up front. Clamping panning to a margin around them means a
-  // stray scroll/trackpad gesture can never drag the board out of view —
-  // that was the bug: panOnScroll turned an ordinary mouse-wheel scroll
-  // into a pan, and with no minimap there was no way to tell the board
-  // had drifted off past the other lanes.
+  // Generous, not restrictive — nodes are draggable, so the canvas should
+  // give room to move things around rather than pin them in place.
   const canvasBounds = useMemo((): [[number, number], [number, number]] => {
-    const width = COL_SYNTHESIS + NODE_W.synthesis + 200;
-    const height = LANE_TOP + strategies.length * LANE_H + 200;
+    const width = COL_SYNTHESIS + NODE_W.synthesis + 500;
+    const height = LANE_TOP + strategies.length * LANE_H + 500;
     return [
-      [-200, -200],
+      [-500, -500],
       [width, height],
     ];
   }, [strategies.length]);
@@ -1406,9 +1242,6 @@ export default function ArenaLive({
   const fitOnceRef = useRef(false);
   const handleInit = useCallback((instance: ReactFlowInstance) => {
     rfInstanceRef.current = instance;
-    // Fit once more shortly after mount — the first pass can run before
-    // custom nodes report their real measured size, which used to leave
-    // fitView zoomed/panned to an incomplete bounding box.
     if (!fitOnceRef.current) {
       fitOnceRef.current = true;
       setTimeout(() => instance.fitView({ padding: 0.15, duration: 200 }), 80);
@@ -1417,7 +1250,16 @@ export default function ArenaLive({
 
   const scenarioChipsList = useMemo(() => scenarioChips(scenario), [scenario]);
 
-  const nodes: Node[] = useMemo(() => {
+  // ---------------------------------------------------------------------
+  // Node data — this is only ever a *spec* (data + a default position for
+  // a node's first appearance). It is merged into react-flow's own node
+  // state below, which is the single source of truth for where a node
+  // actually sits. This is the fix for dragged nodes snapping back: we
+  // used to feed a brand-new nodes array (with brand-new positions)
+  // straight into <ReactFlow nodes={...}> on every metrics tick, which
+  // silently discarded any position the user had dragged a node to.
+  // ---------------------------------------------------------------------
+  const nodeSpecs: Node[] = useMemo(() => {
     const list: Node[] = [];
     strategies.forEach((s, i) => {
       const live = candidates[s.id];
@@ -1431,8 +1273,6 @@ export default function ArenaLive({
         type: "strategy",
         position: { x: COL_STRATEGY, y },
         width: NODE_W.strategy,
-        draggable: false,
-        selectable: true,
         data: {
           index: i,
           strategy: s,
@@ -1451,43 +1291,20 @@ export default function ArenaLive({
         } satisfies StrategyNodeData,
       } as Node);
 
-      const telemetryStatus: NodeStatus =
-        status === "active" ? "active" : status === "idle" ? "idle" : status;
-      list.push({
-        id: `telemetry-${s.id}`,
-        type: "telemetry",
-        position: { x: COL_TELEMETRY, y: y + 20 },
-        width: NODE_W.telemetry,
-        draggable: false,
-        data: {
-          live,
-          status: telemetryStatus,
-          selected: selectedId === s.id && selectedKind === "telemetry",
-          onSelect: () => {
-            setSelectedId(s.id);
-            setSelectedKind("telemetry");
-          },
-        } satisfies TelemetryNodeData,
-      } as Node);
-
       list.push({
         id: `metrics-${s.id}`,
         type: "metrics",
         position: { x: COL_METRICS, y: y + 10 },
         width: NODE_W.metrics,
-        draggable: false,
         data: {
           scenario,
           live,
           result,
-          status: telemetryStatus,
-          // Reuses the "telemetry" inspector kind so clicking the Metrics
-          // node opens the same rich drawer (gauges, console, requests)
-          // Telemetry does — no separate drawer to keep in sync.
-          selected: selectedId === s.id && selectedKind === "telemetry",
+          status,
+          selected: selectedId === s.id && selectedKind === "metrics",
           onSelect: () => {
             setSelectedId(s.id);
-            setSelectedKind("telemetry");
+            setSelectedKind("metrics");
           },
         } satisfies MetricsNodeData,
       } as Node);
@@ -1495,9 +1312,8 @@ export default function ArenaLive({
       list.push({
         id: `result-${s.id}`,
         type: "result",
-        position: { x: COL_RESULT, y: y + 30 },
+        position: { x: COL_RESULT, y: y + 40 },
         width: NODE_W.result,
-        draggable: false,
         data: {
           strategy: s,
           result,
@@ -1517,8 +1333,6 @@ export default function ArenaLive({
       type: "synthesis",
       position: { x: COL_SYNTHESIS, y: LANE_TOP + LANE_H },
       width: NODE_W.synthesis,
-      draggable: false,
-      selectable: false,
       data: {
         strategies,
         results: completedResults,
@@ -1545,6 +1359,24 @@ export default function ArenaLive({
     scenarioChipsList,
   ]);
 
+  // react-flow's own node state — the single source of truth for position.
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>(nodeSpecs);
+
+  // Merge fresh data (status, live metrics, callbacks, …) into the existing
+  // node state WITHOUT touching position, unless a node is brand new (in
+  // which case it gets its default slot). This is what keeps a dragged
+  // node exactly where the user put it, forever, regardless of how often
+  // the live stream ticks.
+  useEffect(() => {
+    setNodes((current) => {
+      const posById = new Map(current.map((n) => [n.id, n.position]));
+      return nodeSpecs.map((spec) => ({
+        ...spec,
+        position: posById.get(spec.id) ?? spec.position,
+      }));
+    });
+  }, [nodeSpecs, setNodes]);
+
   const edges: Edge[] = useMemo(() => {
     const list: Edge[] = [];
     strategies.forEach((s) => {
@@ -1556,26 +1388,16 @@ export default function ArenaLive({
       const branchActive = stage === "benchmarking" || stage === "telemetry";
 
       list.push({
-        id: `e-strat-tel-${s.id}`,
+        id: `e-strat-met-${s.id}`,
         source: `strategy-${s.id}`,
-        target: `telemetry-${s.id}`,
-        type: "flow",
-        data: {
-          status:
-            pipelineActive || status === "done"
-              ? pipelineActive
-                ? "active"
-                : "done"
-              : status,
-        },
-      } as Edge);
-      list.push({
-        id: `e-tel-met-${s.id}`,
-        source: `telemetry-${s.id}`,
         target: `metrics-${s.id}`,
         type: "flow",
         data: {
-          status: branchActive ? "active" : status === "done" ? "done" : status,
+          status: pipelineActive
+            ? "active"
+            : status === "done"
+              ? "done"
+              : status,
         },
       } as Edge);
       list.push({
@@ -1608,14 +1430,20 @@ export default function ArenaLive({
       >
         <style>{`
           @keyframes arenaPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.82); } }
-          @keyframes arenaRingPulse { 0% { box-shadow: 0 0 0 0 rgba(245,196,0,0.35); } 100% { box-shadow: 0 0 0 10px rgba(245,196,0,0); } }
-          @keyframes drawerIn { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: translateX(0); } }
+          @keyframes drawerIn { from { opacity: 0; transform: translateX(14px); } to { opacity: 1; transform: translateX(0); } }
+          @keyframes reportIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
           .arena-node { transition: box-shadow 140ms ease, border-color 140ms ease, opacity 200ms ease; }
-          .arena-node:hover { box-shadow: 0 10px 26px rgba(20,17,0,0.08); }
+          .arena-node:hover { box-shadow: ${SHADOW_HOVER}; }
+          .arena-node:active { cursor: grabbing; }
           .react-flow__attribution { display: none; }
+          .react-flow__pane { background: ${CANVAS}; }
           .react-flow__controls { box-shadow: none; border: 1px solid ${BORDER}; border-radius: 10px; overflow: hidden; }
           .react-flow__controls-button { background: ${BG}; border-bottom: 1px solid ${BORDER}; }
+          .react-flow__controls-button:hover { background: ${SURFACE}; }
           .react-flow__controls-button svg { fill: ${TEXT_SECONDARY}; }
+          .react-flow__minimap { border-radius: 10px; }
+          .react-flow__handle { transition: transform 120ms ease; }
+          .react-flow__node:hover .react-flow__handle { transform: scale(1.3); }
           @media (prefers-reduced-motion: reduce) { *[style*="animation"] { animation: none !important; } }
         `}</style>
 
@@ -1651,14 +1479,11 @@ export default function ArenaLive({
             edges={edges}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
-            nodesDraggable={false}
+            onNodesChange={onNodesChange}
+            nodesDraggable
             nodesConnectable={false}
             elementsSelectable
             onInit={handleInit}
-            // Scroll zooms, like every other tool on the page — it does NOT
-            // pan. Panning only happens on an explicit click-drag, and even
-            // then it's clamped to translateExtent below so the board can
-            // never end up scrolled somewhere with nothing in view.
             panOnScroll={false}
             zoomOnScroll
             panOnDrag
@@ -1667,12 +1492,13 @@ export default function ArenaLive({
             proOptions={{ hideAttribution: true }}
             fitView
             fitViewOptions={{ padding: 0.15 }}
-            minZoom={0.4}
-            maxZoom={1.25}
+            minZoom={0.35}
+            maxZoom={1.5}
+            defaultEdgeOptions={{ type: "flow" }}
           >
             <Background
               variant={BackgroundVariant.Dots}
-              gap={22}
+              gap={24}
               size={1}
               color={BORDER}
             />
@@ -1681,7 +1507,7 @@ export default function ArenaLive({
               position="bottom-right"
               pannable
               zoomable
-              maskColor="rgba(245, 196, 0, 0.06)"
+              maskColor="rgba(15, 15, 20, 0.04)"
               style={{
                 background: BG,
                 border: `1px solid ${BORDER}`,
@@ -1749,7 +1575,6 @@ function TopBar({
   totalRequestsFired: number;
   onClose: () => void;
 }) {
-  const live = !finalResult;
   return (
     <div
       className="relative z-20 flex shrink-0 flex-wrap items-center justify-between gap-4 border-b px-6 py-3.5"
@@ -1757,38 +1582,33 @@ function TopBar({
     >
       <div className="flex min-w-0 items-center gap-3.5">
         <div
-          className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
-          style={{
-            background: finalResult ? ACCENT_SOFT : LIVE_SOFT,
-            animation: live
-              ? "arenaRingPulse 2.2s ease-out infinite"
-              : undefined,
-          }}
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
+          style={{ background: finalResult ? YELLOW_TINT : SURFACE }}
         >
           {finalResult ? (
-            <Trophy size={15} style={{ color: "#8A6D00" }} />
+            <Trophy size={15} style={{ color: YELLOW_DEEP }} />
           ) : (
-            <Layers size={15} style={{ color: LIVE }} />
+            <Layers size={15} style={{ color: TEXT_SECONDARY }} />
           )}
         </div>
         <div className="min-w-0">
           <div
-            className="flex items-center gap-2 text-[10.5px] font-bold uppercase tracking-[0.08em]"
+            className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.08em]"
             style={{ color: TEXT_TERTIARY }}
           >
             <span
               className="flex h-1.5 w-1.5 rounded-full"
               style={{
-                background: finalResult ? TEXT_QUIET : LIVE,
-                animation: live
-                  ? "arenaPulse 1.6s ease-in-out infinite"
-                  : undefined,
+                background: finalResult ? TEXT_QUIET : YELLOW,
+                animation: finalResult
+                  ? undefined
+                  : "arenaPulse 1.6s ease-in-out infinite",
               }}
             />
             Optimization Arena
           </div>
           <h1
-            className="mt-0.5 truncate text-[16.5px] font-semibold"
+            className="mt-0.5 truncate text-[16px] font-semibold"
             style={{ color: TEXT_PRIMARY }}
           >
             {finalResult
@@ -1803,11 +1623,11 @@ function TopBar({
       </div>
 
       <div
-        className="flex items-center gap-5 text-[12px]"
+        className="flex items-center gap-5 text-[11.5px]"
         style={{ color: TEXT_TERTIARY, fontFamily: MONO }}
       >
         <span
-          className="rounded-full border px-2.5 py-1 text-[10.5px] font-bold"
+          className="rounded-full border px-2.5 py-1 text-[10px] font-bold"
           style={{ borderColor: BORDER_STRONG, color: TEXT_SECONDARY }}
         >
           {routeLabel}
@@ -1819,7 +1639,7 @@ function TopBar({
         <span className="flex items-center gap-1.5">
           <Activity
             size={12}
-            style={{ color: totalRequestsFired > 0 ? LIVE : TEXT_QUIET }}
+            style={{ color: totalRequestsFired > 0 ? YELLOW_DEEP : TEXT_QUIET }}
           />
           {totalRequestsFired.toLocaleString()} req fired
         </span>
@@ -1834,7 +1654,7 @@ function TopBar({
 
       <button
         onClick={onClose}
-        className="flex items-center gap-1.5 rounded-lg border px-3 py-2 text-[12.5px] font-medium transition-colors"
+        className="flex items-center gap-1.5 rounded-lg border px-3 py-2 text-[12px] font-medium transition-colors hover:bg-black/[0.03]"
         style={{ borderColor: BORDER_STRONG, color: TEXT_SECONDARY }}
       >
         <X size={13} />
@@ -1856,7 +1676,7 @@ function ErrorBanner({ text }: { text: string }) {
           style={{ color: ERROR }}
           className="mt-0.5 shrink-0"
         />
-        <p className="text-[12.5px]" style={{ color: ERROR }}>
+        <p className="text-[12px]" style={{ color: ERROR_TEXT }}>
           {text}
         </p>
       </div>
@@ -1870,7 +1690,11 @@ function PrewarmPill({ message }: { message: string }) {
       className="pointer-events-auto flex items-center gap-2.5 rounded-full border px-4 py-2 shadow-sm"
       style={{ borderColor: BORDER_STRONG, background: BG }}
     >
-      <Loader2 size={13} className="animate-spin" style={{ color: GOLD }} />
+      <Loader2
+        size={13}
+        className="animate-spin"
+        style={{ color: YELLOW_DEEP }}
+      />
       <span
         className="text-[12px] font-medium"
         style={{ color: TEXT_SECONDARY }}
@@ -1883,10 +1707,7 @@ function PrewarmPill({ message }: { message: string }) {
 }
 
 // ---------------------------------------------------------------------------
-// Inspector drawer — the deep dive for whichever node was clicked. Both the
-// Telemetry node and the Metrics node open this with kind="telemetry" —
-// they're two views of the same live candidate state, so they share one
-// drawer instead of forking into duplicate gauge/console/table code.
+// Inspector drawer
 // ---------------------------------------------------------------------------
 function InspectorDrawer({
   strategy,
@@ -1900,7 +1721,7 @@ function InspectorDrawer({
   routeIndex,
 }: {
   strategy: OptimizationStrategy;
-  kind: "strategy" | "telemetry" | "result";
+  kind: "strategy" | "metrics" | "result";
   live?: CandidateLiveState;
   result?: ArenaCandidateResult;
   isRunning: boolean;
@@ -1934,7 +1755,7 @@ function InspectorDrawer({
       className="fixed inset-y-0 right-0 z-[110] flex w-full flex-col overflow-hidden border-l shadow-2xl sm:w-[440px]"
       style={{
         borderColor: BORDER,
-        background: SURFACE,
+        background: BG,
         animation: "drawerIn 200ms ease-out",
       }}
     >
@@ -1949,12 +1770,12 @@ function InspectorDrawer({
           >
             {kind === "strategy"
               ? "Strategy"
-              : kind === "telemetry"
-                ? "Live telemetry & metrics"
+              : kind === "metrics"
+                ? "Live metrics"
                 : "Result"}
           </div>
           <h3
-            className="mt-0.5 truncate text-[15px] font-semibold"
+            className="mt-0.5 truncate text-[14.5px] font-semibold"
             style={{ color: TEXT_PRIMARY, fontFamily: MONO }}
           >
             {strategy.title}
@@ -1962,7 +1783,7 @@ function InspectorDrawer({
         </div>
         <button
           onClick={onClose}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md hover:bg-black/[0.04]"
           style={{ color: TEXT_QUIET }}
         >
           <X size={15} />
@@ -1979,10 +1800,10 @@ function InspectorDrawer({
               {strategy.description}
             </p>
             <div
-              className="flex items-center gap-1.5 text-[11.5px]"
+              className="flex items-center gap-1.5 text-[11px]"
               style={{ color: TEXT_TERTIARY }}
             >
-              <Sparkles size={12} style={{ color: GOLD }} />
+              <Sparkles size={12} style={{ color: YELLOW_DEEP }} />
               Estimated +{strategy.estimatedImprovementPercent.min}–
               {strategy.estimatedImprovementPercent.max}% ·{" "}
               {strategy.confidence} confidence
@@ -1990,7 +1811,7 @@ function InspectorDrawer({
 
             <div>
               <div
-                className="mb-2 flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-[0.06em]"
+                className="mb-2 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.06em]"
                 style={{ color: TEXT_TERTIARY }}
               >
                 <GitBranch size={12} /> Pipeline
@@ -2008,9 +1829,9 @@ function InspectorDrawer({
                           : "pending";
                   const color =
                     stepState === "done"
-                      ? LIVE
+                      ? INK
                       : stepState === "active"
-                        ? GOLD
+                        ? YELLOW_DEEP
                         : stepState === "failed"
                           ? ERROR
                           : TEXT_QUIET;
@@ -2042,8 +1863,8 @@ function InspectorDrawer({
                 })}
               </div>
               <p
-                className="mt-2 text-[12.5px]"
-                style={{ color: failed ? ERROR : TEXT_SECONDARY }}
+                className="mt-2 text-[12px]"
+                style={{ color: failed ? ERROR_TEXT : TEXT_SECONDARY }}
               >
                 {failed
                   ? (live?.error ?? result?.error ?? "Failed")
@@ -2057,8 +1878,11 @@ function InspectorDrawer({
               <button
                 onClick={onRun}
                 disabled={isRunning}
-                className="flex items-center justify-center gap-1.5 rounded-lg px-4 py-2 text-[12.5px] font-bold transition-all hover:brightness-105 disabled:opacity-40"
-                style={{ background: GOLD, color: "#241C00" }}
+                className="flex items-center justify-center gap-1.5 rounded-lg px-4 py-2 text-[12px] font-bold transition-all hover:brightness-[1.03] disabled:opacity-40"
+                style={{
+                  background: failed ? ERROR : YELLOW,
+                  color: failed ? "#fff" : INK,
+                }}
               >
                 {isRunning ? (
                   <Loader2 size={13} className="animate-spin" />
@@ -2077,7 +1901,7 @@ function InspectorDrawer({
 
             <div>
               <div
-                className="mb-2 flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-[0.06em]"
+                className="mb-2 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.06em]"
                 style={{ color: TEXT_TERTIARY }}
               >
                 <FileCode size={12} /> Code change
@@ -2087,7 +1911,7 @@ function InspectorDrawer({
           </div>
         )}
 
-        {kind === "telemetry" && (
+        {kind === "metrics" && (
           <div className="flex flex-col gap-4">
             <GaugeRing
               label="CPU"
@@ -2095,7 +1919,7 @@ function InspectorDrawer({
               value={latestMetric?.cpuPercent ?? result?.cpuPercent ?? null}
               max={100}
               unit="%"
-              color={LIVE}
+              color={INK}
               isLive={isLive}
               trend={cpuTrend}
             />
@@ -2105,7 +1929,7 @@ function InspectorDrawer({
               value={latestMetric?.memoryMB ?? result?.memoryMB ?? null}
               max={memMax}
               unit="MB"
-              color={GOLD}
+              color={YELLOW_DEEP}
               isLive={isLive}
               trend={memTrend}
             />
@@ -2118,8 +1942,8 @@ function InspectorDrawer({
                 onClick={() => setTab("console")}
                 className="rounded-lg px-2.5 py-1 text-[11px] font-semibold transition-colors"
                 style={{
-                  background: tab === "console" ? ACCENT_SOFT : "transparent",
-                  color: tab === "console" ? "#8A6D00" : TEXT_TERTIARY,
+                  background: tab === "console" ? YELLOW_TINT : "transparent",
+                  color: tab === "console" ? YELLOW_DEEP : TEXT_TERTIARY,
                 }}
               >
                 Console
@@ -2128,8 +1952,8 @@ function InspectorDrawer({
                 onClick={() => setTab("requests")}
                 className="flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-semibold transition-colors"
                 style={{
-                  background: tab === "requests" ? ACCENT_SOFT : "transparent",
-                  color: tab === "requests" ? "#8A6D00" : TEXT_TERTIARY,
+                  background: tab === "requests" ? YELLOW_TINT : "transparent",
+                  color: tab === "requests" ? YELLOW_DEEP : TEXT_TERTIARY,
                 }}
               >
                 <List size={11} /> Requests
@@ -2137,7 +1961,7 @@ function InspectorDrawer({
                   <span
                     className="rounded-full px-1.5 text-[9px]"
                     style={{
-                      background: SURFACE_SUNKEN,
+                      background: SURFACE,
                       color: TEXT_SECONDARY,
                     }}
                   >
@@ -2182,7 +2006,7 @@ function InspectorDrawer({
         {kind === "result" && (
           <div className="flex flex-col gap-4">
             {!result ? (
-              <p className="text-[12.5px]" style={{ color: TEXT_QUIET }}>
+              <p className="text-[12px]" style={{ color: TEXT_QUIET }}>
                 This strategy hasn't finished a run yet.
               </p>
             ) : result.status === "failed" ? (
@@ -2195,7 +2019,7 @@ function InspectorDrawer({
                   style={{ color: ERROR }}
                   className="mt-0.5 shrink-0"
                 />
-                <p className="text-[13px]" style={{ color: "#8F4436" }}>
+                <p className="text-[13px]" style={{ color: ERROR_TEXT }}>
                   {result.error}
                 </p>
               </div>
@@ -2227,7 +2051,7 @@ function InspectorDrawer({
                     }
                     accent={
                       result.runResult && result.runResult.errorCount > 0
-                        ? ERROR
+                        ? ERROR_TEXT
                         : undefined
                     }
                   />
@@ -2285,13 +2109,16 @@ function ReportDrawer({
   );
 
   return (
-    <div className="fixed inset-0 z-[120] flex justify-end">
-      <div className="absolute inset-0 bg-black/25" onClick={onClose} />
+    <div
+      className="fixed inset-0 z-[120] flex justify-end"
+      style={{ animation: "reportIn 160ms ease-out" }}
+    >
+      <div className="absolute inset-0 bg-black/20" onClick={onClose} />
       <div
         className="relative flex h-full w-full flex-col overflow-hidden border-l shadow-2xl sm:w-[560px]"
         style={{
           borderColor: BORDER,
-          background: SURFACE,
+          background: BG,
           animation: "drawerIn 220ms ease-out",
         }}
       >
@@ -2300,7 +2127,7 @@ function ReportDrawer({
           style={{ borderColor: BORDER, background: BG }}
         >
           <div className="flex items-center gap-2">
-            <Trophy size={16} style={{ color: "#8A6D00" }} />
+            <Trophy size={16} style={{ color: YELLOW_DEEP }} />
             <h3
               className="text-[15px] font-semibold"
               style={{ color: TEXT_PRIMARY }}
@@ -2310,7 +2137,7 @@ function ReportDrawer({
           </div>
           <button
             onClick={onClose}
-            className="flex h-7 w-7 items-center justify-center rounded-md"
+            className="flex h-7 w-7 items-center justify-center rounded-md hover:bg-black/[0.04]"
             style={{ color: TEXT_QUIET }}
           >
             <X size={15} />
@@ -2329,8 +2156,8 @@ function ReportDrawer({
                   key={c.strategyId}
                   className="overflow-hidden rounded-2xl border"
                   style={{
-                    borderColor: isWinner ? GOLD : BORDER_STRONG,
-                    background: isWinner ? "#FFFBEE" : SURFACE_RAISED,
+                    borderColor: isWinner ? YELLOW : BORDER_STRONG,
+                    background: BG,
                   }}
                 >
                   <div
@@ -2353,13 +2180,13 @@ function ReportDrawer({
                     </span>
                     <div className="min-w-0 flex-1">
                       <div
-                        className="truncate text-[13.5px] font-semibold"
+                        className="truncate text-[13px] font-semibold"
                         style={{ color: TEXT_PRIMARY, fontFamily: MONO }}
                       >
                         {c.title || strategy?.title}
                       </div>
                       <div
-                        className="text-[10.5px]"
+                        className="text-[10px]"
                         style={{ color: TEXT_TERTIARY }}
                       >
                         {strategy?.approach}
@@ -2367,18 +2194,18 @@ function ReportDrawer({
                     </div>
                     {isWinner && (
                       <span
-                        className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.06em]"
-                        style={{ background: GOLD, color: "#241C00" }}
+                        className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[9.5px] font-bold uppercase tracking-[0.06em]"
+                        style={{ background: YELLOW, color: INK }}
                       >
                         <Trophy size={11} /> Best
                       </span>
                     )}
                     {!failed && (
                       <span
-                        className="rounded-lg border px-2.5 py-1 text-[12px] font-bold"
+                        className="rounded-lg border px-2.5 py-1 text-[11.5px] font-bold"
                         style={{
-                          borderColor: isWinner ? GOLD : BORDER_STRONG,
-                          color: isWinner ? "#8A6D00" : TEXT_PRIMARY,
+                          borderColor: isWinner ? YELLOW_DEEP : BORDER_STRONG,
+                          color: isWinner ? YELLOW_DEEP : TEXT_PRIMARY,
                           fontFamily: MONO,
                         }}
                       >
@@ -2423,7 +2250,7 @@ function ReportDrawer({
                           }
                           accent={
                             c.runResult && c.runResult.errorCount > 0
-                              ? ERROR
+                              ? ERROR_TEXT
                               : undefined
                           }
                         />
@@ -2451,8 +2278,8 @@ function ReportDrawer({
                   )}
                   {expanded && failed && (
                     <div
-                      className="border-t px-4 py-3 text-[12.5px]"
-                      style={{ borderColor: BORDER, color: ERROR }}
+                      className="border-t px-4 py-3 text-[12px]"
+                      style={{ borderColor: BORDER, color: ERROR_TEXT }}
                     >
                       {c.error}
                     </div>
@@ -2468,8 +2295,7 @@ function ReportDrawer({
 }
 
 // ---------------------------------------------------------------------------
-// Small shared pieces (diffs, gauges, panels, stats) — unchanged mechanics,
-// only spacing/scale tuned to sit inside the new drawers.
+// Shared small pieces
 // ---------------------------------------------------------------------------
 function SingleFileDiff({ change }: { change: FileChange }) {
   const isCreate = change.changeType === "create";
@@ -2482,20 +2308,20 @@ function SingleFileDiff({ change }: { change: FileChange }) {
     >
       <div
         className="flex items-center gap-2 border-b px-3.5 py-2"
-        style={{ borderColor: CONSOLE_BORDER, background: SURFACE_RAISED }}
+        style={{ borderColor: CONSOLE_BORDER, background: SURFACE }}
       >
         <FileCode size={12} style={{ color: TEXT_TERTIARY }} />
         <span
-          className="text-[11.5px] font-medium"
+          className="text-[11px] font-medium"
           style={{ color: TEXT_SECONDARY, fontFamily: MONO }}
         >
           {change.filePath}
         </span>
         <span
-          className="ml-auto rounded-full px-2 py-0.5 text-[9.5px] font-bold uppercase tracking-[0.05em]"
+          className="ml-auto rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.05em]"
           style={{
-            background: isCreate ? LIVE_SOFT : SURFACE_SUNKEN,
-            color: isCreate ? LIVE : TEXT_SECONDARY,
+            background: isCreate ? YELLOW_TINT : SURFACE,
+            color: isCreate ? YELLOW_DEEP : TEXT_SECONDARY,
           }}
         >
           {isCreate ? "New file" : "Modified"}
@@ -2505,17 +2331,17 @@ function SingleFileDiff({ change }: { change: FileChange }) {
         style={{ background: CONSOLE_BG, maxHeight: 220, overflowY: "auto" }}
       >
         {!isCreate && (
-          <div className="border-b" style={{ borderColor: ERROR_SOFT }}>
+          <div className="border-b" style={{ borderColor: "#2A1414" }}>
             {oldLines.map((line, i) => (
               <div
                 key={`old-${i}`}
-                className="flex px-3.5 py-0.5 text-[11.5px] leading-[1.6]"
-                style={{ background: ERROR_SOFT, fontFamily: MONO }}
+                className="flex px-3.5 py-0.5 text-[11px] leading-[1.6]"
+                style={{ background: "#1F1010", fontFamily: MONO }}
               >
                 <span className="mr-3 select-none" style={{ color: ERROR }}>
                   −
                 </span>
-                <span style={{ color: "#8F4436" }}>{line || " "}</span>
+                <span style={{ color: "#E5A6A6" }}>{line || " "}</span>
               </div>
             ))}
           </div>
@@ -2524,13 +2350,13 @@ function SingleFileDiff({ change }: { change: FileChange }) {
           {newLines.map((line, i) => (
             <div
               key={`new-${i}`}
-              className="flex px-3.5 py-0.5 text-[11.5px] leading-[1.6]"
-              style={{ background: LIVE_SOFT, fontFamily: MONO }}
+              className="flex px-3.5 py-0.5 text-[11px] leading-[1.6]"
+              style={{ background: "#1A1908", fontFamily: MONO }}
             >
-              <span className="mr-3 select-none" style={{ color: LIVE }}>
+              <span className="mr-3 select-none" style={{ color: YELLOW }}>
                 +
               </span>
-              <span style={{ color: "#1F6B44" }}>{line || " "}</span>
+              <span style={{ color: "#E7DFA9" }}>{line || " "}</span>
             </div>
           ))}
         </div>
@@ -2561,16 +2387,16 @@ function MiniStat({
   return (
     <div
       className="rounded-lg border px-3.5 py-2.5"
-      style={{ borderColor: BORDER_STRONG, background: SURFACE }}
+      style={{ borderColor: BORDER, background: SURFACE }}
     >
       <div
-        className="text-[10px] font-medium uppercase tracking-[0.06em]"
+        className="text-[9.5px] font-medium uppercase tracking-[0.06em]"
         style={{ color: TEXT_TERTIARY }}
       >
         {label}
       </div>
       <div
-        className="mt-1 text-[14px] font-semibold"
+        className="mt-1 text-[13.5px] font-semibold"
         style={{ color: accent ?? TEXT_PRIMARY, fontFamily: MONO }}
       >
         {value}
@@ -2591,16 +2417,16 @@ function StatBox({
   return (
     <div
       className="rounded-xl border px-3.5 py-3"
-      style={{ borderColor: BORDER, background: SURFACE }}
+      style={{ borderColor: BORDER, background: BG }}
     >
       <div
-        className="text-[10px] font-semibold uppercase tracking-[0.05em]"
+        className="text-[9.5px] font-semibold uppercase tracking-[0.05em]"
         style={{ color: TEXT_TERTIARY }}
       >
         {label}
       </div>
       <div
-        className="mt-1 text-[15px] font-bold"
+        className="mt-1 text-[14.5px] font-bold"
         style={{ color: accent ?? TEXT_PRIMARY, fontFamily: MONO }}
       >
         {value}
@@ -2613,17 +2439,47 @@ function LiveBadge() {
   return (
     <span
       className="flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.05em]"
-      style={{ background: LIVE_SOFT, color: LIVE }}
+      style={{ background: YELLOW_TINT, color: YELLOW_DEEP }}
     >
       <span
         className="h-1.5 w-1.5 rounded-full"
         style={{
-          background: LIVE,
+          background: YELLOW,
           animation: "arenaPulse 1.4s ease-in-out infinite",
         }}
       />
       Live
     </span>
+  );
+}
+
+function Sparkline({ data, color }: { data: number[]; color: string }) {
+  const chartData = useMemo(() => data.map((v, i) => ({ i, v })), [data]);
+  if (chartData.length < 2) {
+    return (
+      <div
+        className="flex h-9 items-center text-[10px]"
+        style={{ color: TEXT_QUIET }}
+      >
+        sampling…
+      </div>
+    );
+  }
+  return (
+    <ResponsiveContainer width="100%" height={36}>
+      <AreaChart data={chartData}>
+        <YAxis hide domain={["auto", "auto"]} />
+        <Area
+          type="monotone"
+          dataKey="v"
+          stroke={color}
+          fill={color}
+          fillOpacity={0.14}
+          strokeWidth={1.5}
+          isAnimationActive={false}
+        />
+      </AreaChart>
+    </ResponsiveContainer>
   );
 }
 
@@ -2653,7 +2509,7 @@ function GaugeRing({
   return (
     <div
       className="flex items-center gap-3 rounded-xl border px-4 py-3"
-      style={{ borderColor: BORDER, background: SURFACE_RAISED }}
+      style={{ borderColor: BORDER, background: SURFACE }}
     >
       <div className="relative flex h-[68px] w-[68px] shrink-0 items-center justify-center">
         <svg width={68} height={68} viewBox="0 0 68 68" className="-rotate-90">
@@ -2695,7 +2551,7 @@ function GaugeRing({
       </div>
       <div className="min-w-0 flex-1">
         <div
-          className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.05em]"
+          className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.05em]"
           style={{ color: TEXT_TERTIARY }}
         >
           <Icon size={12} />
@@ -2733,19 +2589,18 @@ function LatencyPanel({
   return (
     <div
       className="rounded-xl border px-4 py-3"
-      style={{ borderColor: BORDER, background: SURFACE_RAISED }}
+      style={{ borderColor: BORDER, background: SURFACE }}
     >
       <div className="mb-1.5 flex items-center justify-between">
         <span
-          className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.05em]"
+          className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.05em]"
           style={{ color: TEXT_TERTIARY }}
         >
-          <Gauge size={12} />
-          Latency{isLive && <LiveBadge />}
+          <Gauge size={12} /> Latency{isLive && <LiveBadge />}
         </span>
         {value && (
           <span
-            className="text-[12.5px] font-semibold"
+            className="text-[12px] font-semibold"
             style={{ color: TEXT_PRIMARY, fontFamily: MONO }}
           >
             {value}
@@ -2765,8 +2620,8 @@ function LatencyPanel({
               <Area
                 type="monotone"
                 dataKey="latency"
-                stroke={GOLD}
-                fill={GOLD}
+                stroke={YELLOW_DEEP}
+                fill={YELLOW}
                 fillOpacity={0.16}
                 strokeWidth={1.5}
                 isAnimationActive={false}
@@ -2774,12 +2629,7 @@ function LatencyPanel({
             </AreaChart>
           </ResponsiveContainer>
         ) : (
-          <div
-            className="flex h-full items-center text-[11px]"
-            style={{ color: TEXT_QUIET }}
-          >
-            Plots as each request finishes…
-          </div>
+          <EmptyChartHint text="Plots as each request finishes…" />
         )}
       </div>
     </div>
@@ -2809,19 +2659,18 @@ function ThroughputPanel({
   return (
     <div
       className="rounded-xl border px-4 py-3"
-      style={{ borderColor: BORDER, background: SURFACE_RAISED }}
+      style={{ borderColor: BORDER, background: SURFACE }}
     >
       <div className="mb-1.5 flex items-center justify-between">
         <span
-          className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.05em]"
+          className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.05em]"
           style={{ color: TEXT_TERTIARY }}
         >
-          <TrendingUp size={12} />
-          Throughput{isLive && <LiveBadge />}
+          <TrendingUp size={12} /> Throughput{isLive && <LiveBadge />}
         </span>
         {latest && (
           <span
-            className="text-[12.5px] font-semibold"
+            className="text-[12px] font-semibold"
             style={{ color: TEXT_PRIMARY, fontFamily: MONO }}
           >
             {latest.rps} req/s
@@ -2839,19 +2688,14 @@ function ThroughputPanel({
               />
               <Bar
                 dataKey="rps"
-                fill={LIVE}
+                fill={INK}
                 radius={[2, 2, 0, 0]}
                 isAnimationActive={false}
               />
             </BarChart>
           </ResponsiveContainer>
         ) : (
-          <div
-            className="flex h-full items-center text-[11px]"
-            style={{ color: TEXT_QUIET }}
-          >
-            Requests per second, bucketed live…
-          </div>
+          <EmptyChartHint text="Requests per second, bucketed live…" />
         )}
       </div>
     </div>
@@ -2878,15 +2722,14 @@ function TelemetryPanel({
   return (
     <div
       className="rounded-xl border px-4 py-3"
-      style={{ borderColor: BORDER, background: SURFACE_RAISED }}
+      style={{ borderColor: BORDER, background: SURFACE }}
     >
       <div className="mb-1.5 flex items-center justify-between">
         <span
-          className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.05em]"
+          className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.05em]"
           style={{ color: TEXT_TERTIARY }}
         >
-          <Database size={12} />
-          SigNoz{isLive && <LiveBadge />}
+          <Database size={12} /> SigNoz{isLive && <LiveBadge />}
         </span>
         {t && (
           <span
@@ -2914,7 +2757,7 @@ function TelemetryPanel({
               <Line
                 type="monotone"
                 dataKey="p95"
-                stroke={GOLD}
+                stroke={YELLOW_DEEP}
                 dot={false}
                 strokeWidth={1.75}
                 isAnimationActive={false}
@@ -2922,12 +2765,7 @@ function TelemetryPanel({
             </LineChart>
           </ResponsiveContainer>
         ) : (
-          <div
-            className="flex h-full items-center text-[11px]"
-            style={{ color: TEXT_QUIET }}
-          >
-            Waiting for spans…
-          </div>
+          <EmptyChartHint text="Waiting for spans…" />
         )}
       </div>
     </div>
@@ -2942,7 +2780,7 @@ function RequestLogTable({
   if (entries.length === 0) {
     return (
       <p
-        className="rounded-lg border px-3 py-2 text-[11.5px]"
+        className="rounded-lg border px-3 py-2 text-[11px]"
         style={{ borderColor: BORDER, color: TEXT_TERTIARY }}
       >
         Waiting for the first request…
@@ -2956,7 +2794,7 @@ function RequestLogTable({
     >
       <table className="w-full text-[11px]" style={{ fontFamily: MONO }}>
         <thead>
-          <tr className="sticky top-0" style={{ background: SURFACE_RAISED }}>
+          <tr className="sticky top-0" style={{ background: SURFACE }}>
             <th
               className="px-2.5 py-1.5 text-left font-semibold"
               style={{ color: TEXT_TERTIARY }}
@@ -3000,7 +2838,7 @@ function RequestLogTable({
                 </td>
                 <td
                   className="px-2.5 py-1.5 font-semibold"
-                  style={{ color: r.ok ? LIVE : ERROR }}
+                  style={{ color: r.ok ? INK : ERROR }}
                 >
                   {r.status}
                 </td>
@@ -3067,7 +2905,7 @@ function CreatePrButton({
         target="_blank"
         rel="noreferrer"
         className="flex items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-[12px] font-bold transition-colors"
-        style={{ borderColor: LIVE, color: LIVE, background: LIVE_SOFT }}
+        style={{ borderColor: INK, color: INK, background: SURFACE }}
       >
         <GitPullRequestArrow size={13} /> PR #{state.prNumber}{" "}
         <ExternalLink size={11} />
@@ -3079,7 +2917,7 @@ function CreatePrButton({
       <button
         onClick={handleClick}
         disabled={state.status === "loading"}
-        className="flex items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-[12px] font-bold transition-colors disabled:opacity-50"
+        className="flex items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-[12px] font-bold transition-colors disabled:opacity-50 hover:bg-black/[0.03]"
         style={{ borderColor: BORDER_STRONG, color: TEXT_PRIMARY }}
       >
         {state.status === "loading" ? (
@@ -3092,7 +2930,7 @@ function CreatePrButton({
       {state.status === "error" && (
         <span
           className="truncate text-[11px]"
-          style={{ color: ERROR }}
+          style={{ color: ERROR_TEXT }}
           title={state.message}
         >
           {state.message}

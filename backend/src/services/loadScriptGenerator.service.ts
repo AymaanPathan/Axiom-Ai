@@ -287,6 +287,19 @@ export function classifyScenario(description: string): ScenarioSpec {
   );
 }
 
+// Which Trend stats k6 includes in the end-of-test summary (and therefore
+// in what handleSummary(data) can read out of data.metrics). k6's own
+// default is ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)'] — p(99) is NOT
+// in it. Since buildOptionsBlock() below mechanically overwrites whatever
+// `options` the model wrote (see applyScenarioOverride), leaving this
+// unset would mean data.metrics.http_req_duration.values["p(99)"] is
+// undefined on every single run regardless of what the model generated —
+// which is exactly the bug that made p99DurationMs always come back null.
+// Setting it explicitly here, in every mode's options block, is what
+// makes rule 12's `p99` extraction actually have something to read.
+const SUMMARY_TREND_STATS =
+  '["avg", "min", "med", "max", "p(90)", "p(95)", "p(99)"]';
+
 // Builds the EXACT k6 `options` block text for a given spec. This is
 // injected verbatim after generation (see applyScenarioOverride), so it
 // doesn't matter what the model itself wrote for `options` — the actual
@@ -300,6 +313,7 @@ function buildOptionsBlock(spec: ScenarioSpec): string {
   stages: [
 ${stages}
   ],
+  summaryTrendStats: ${SUMMARY_TREND_STATS},
   thresholds: {
     "http_req_failed": [{ threshold: "rate<0.05", abortOnFail: true, delayAbortEval: "10s" }],
     "http_req_duration": [{ threshold: "p(95)<1000", abortOnFail: true, delayAbortEval: "10s" }],
@@ -318,6 +332,7 @@ ${stages}
       maxDuration: "${spec.durationSeconds}s",
     },
   },
+  summaryTrendStats: ${SUMMARY_TREND_STATS},
   thresholds: {
     "http_req_failed": ["rate<0.01"],
     "http_req_duration": ["p(95)<500"],
@@ -333,6 +348,7 @@ ${stages}
     { target: ${spec.count}, duration: "${spec.durationSeconds}s" },
     { target: 0, duration: "${rampSeconds}s" },
   ],
+  summaryTrendStats: ${SUMMARY_TREND_STATS},
   thresholds: {
     "http_req_failed": ["rate<0.01"],
     "http_req_duration": ["p(95)<500"],
@@ -350,6 +366,7 @@ ${stages}
       duration: "${spec.durationSeconds}s",
     },
   },
+  summaryTrendStats: ${SUMMARY_TREND_STATS},
   thresholds: {
     "http_req_failed": ["rate<0.01"],
     "http_req_duration": ["p(95)<500"],
