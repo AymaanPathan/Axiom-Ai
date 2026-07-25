@@ -15,12 +15,27 @@ import { detectAppPort } from "../parsing/detect-port.js";
 import { resolveConnectedFiles } from "../parsing/connectedFiles.service.js";
 import { explainEndpoint } from "../services/explain.service.js";
 import { generateTrafficForRoute } from "../services/trafficGenerator.service.js";
-import { DbOperationBreakdown, getDbOperationBreakdown, getRouteTelemetry, RouteTelemetry } from "../services/signoz.service.js";
-import { analyzeLoadTestPerformance, generateOptimizationStrategies, OptimizationStrategy } from "../services/performanceAnalysis.service.js";
+import {
+  DbOperationBreakdown,
+  getDbOperationBreakdown,
+  getRouteTelemetry,
+  RouteTelemetry,
+} from "../services/signoz.service.js";
+import {
+  analyzeLoadTestPerformance,
+  generateOptimizationStrategies,
+  OptimizationStrategy,
+} from "../services/performanceAnalysis.service.js";
 import {
   applySnippetReplace,
   revertFile,
 } from "../services/codePatch.service.js";
+
+import {
+  createStrategyPullRequest,
+  PrCreationError,
+} from "../services/github-pr.service.js";
+
 import {
   getServiceHealth,
   getSystemStatus,
@@ -31,7 +46,10 @@ import {
   generateLoadScript,
   buildEndpointMetadata,
 } from "../services/loadScriptGenerator.service.js";
-import { LoadScriptResult, runLoadScript } from "../services/loadScriptRunner.service.js";
+import {
+  LoadScriptResult,
+  runLoadScript,
+} from "../services/loadScriptRunner.service.js";
 import { detectRouteMiddlewares } from "../parsing/middleware-detect.js";
 
 import {
@@ -39,7 +57,12 @@ import {
   getRecentTraces,
   getRecentErrors,
 } from "../services/signoz-observability.service.js";
-import { finalizeArena, initArenaEnvironment, runArenaCandidate, runOptimizationArena } from "../services/optimizationArena.service.js";
+import {
+  finalizeArena,
+  initArenaEnvironment,
+  runArenaCandidate,
+  runOptimizationArena,
+} from "../services/optimizationArena.service.js";
 import { randomUUID } from "node:crypto";
 import { getIO } from "../config/socket.js";
 
@@ -806,7 +829,6 @@ async function waitForRunTerminal(runId: string): Promise<void> {
   // the max grace period rather than blocking the retest indefinitely.
 }
 
-
 const PORT_RESOLVE_RETRIES = 10;
 const PORT_RESOLVE_INTERVAL_MS = 500;
 
@@ -1026,7 +1048,6 @@ router.post(
   },
 );
 
-
 router.post(
   "/:id/generate-strategies",
   requireAuth,
@@ -1069,6 +1090,26 @@ router.post(
       console.error("Failed to resolve connected files for strategies:", err);
     }
 
+    let knownDependencies: string[] = [];
+    try {
+      const pkgRaw = await fs.readFile(
+        path.join(repoRoot, "package.json"),
+        "utf8",
+      );
+      const pkg = JSON.parse(pkgRaw);
+      knownDependencies = [
+        ...Object.keys(pkg.dependencies ?? {}),
+        ...Object.keys(pkg.devDependencies ?? {}),
+      ];
+    } catch (err) {
+      console.error(
+        "Failed to read package.json for strategy generation:",
+        err,
+      );
+    }
+
+    const knownEnvVars = repository.requiredEnvVars ?? [];
+
     try {
       let dbBreakdown: DbOperationBreakdown[] = [];
       if (telemetry) {
@@ -1087,6 +1128,8 @@ router.post(
         codeContext,
         dbBreakdown,
         knownFilePaths,
+        knownDependencies,
+        knownEnvVars,
       });
       res.json(result);
     } catch (err) {
@@ -1189,5 +1232,138 @@ router.post(
     }
   },
 );
+
+import type { ArenaCandidateResult } from "../services/optimizationArena.service.js";
+
+function slugify(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+}
+
+function buildPrBody(opts: {
+  routeLabel: string;
+  strategy: OptimizationStrategy;
+  candidateResult?: ArenaCandidateResult;
+}): string {
+  const { routeLabel, strategy, candidateResult } = opts;
+  const lines: string[] = [
+    `**Endpoint:** \`${routeLabel}\``,
+    "",
+    `**Approach:** ${strategy.approach}`,
+    "",
+    strategy.description,
+    "",
+    `**Estimated improvement:** +${strategy.estimatedImprovementPercent.min}–${strategy.estimatedImprovementPercent.max}% (${strategy.confidence} confidence)`,
+  ];
+  if (candidateResult?.runResult) {
+    const rr = candidateResult.runResult;
+    lines.push(
+      "",
+      "**Benchmark result from Axiom's Optimization Arena:**",
+      "",
+      "| Metric | Value |",
+      "|---|---|",
+      `| Avg latency | ${Math.round(rr.avgDurationMs)}ms |`,
+      rr.p95DurationMs != null
+        ? `| p95 latency | ${Math.round(rr.p95DurationMs)}ms |`
+        : "",
+      `| Errors | ${rr.errorCount} |`,
+      candidateResult.cpuPercent != null
+        ? `| CPU | ${candidateResult.cpuPercent}% |`
+        : "",
+      candidateResult.memoryMB != null
+        ? `| Memory | ${Math.round(candidateResult.memoryMB)}MB |`
+        : "",
+      candidateResult.score != null
+        ? `| Score | ${candidateResult.score} |`
+        : "",
+    );
+  }
+  lines.push(
+    "",
+    `**Files changed:** ${strategy.changes.map((c) => `\`${c.filePath}\` (${c.changeType})`).join(", ")}`,
+    "",
+    "_Opened automatically by Axiom from the Optimization Arena._",
+  );
+  return lines.filter(Boolean).join("\n");
+}
+
+router.post("/:id/create-pr", requireAuth, async (req: AuthedRequest, res) => {
+  const { routeIndex, strategy, candidateResult } = req.body as {
+    routeIndex?: number;
+    strategy?: OptimizationStrategy;
+    candidateResult?: ArenaCandidateResult;
+  };
+  if (routeIndex === undefined || !strategy) {
+    return res
+      .status(400)
+      .json({ error: "routeIndex and strategy are required" });
+  }
+
+  const repository = await RepositoryModel.findOne({
+    _id: req.params.id,
+    userId: req.user!.githubId,
+  });
+  if (!repository)
+    return res.status(404).json({ error: "Repository not found" });
+
+  const route = repository.discoveredRoutes[routeIndex];
+  if (!route) return res.status(400).json({ error: "Unknown routeIndex" });
+
+  const [owner, repoName] = repository.githubFullName.split("/");
+
+  try {
+    // Re-check the default branch fresh — it may have changed since connect-time.
+    const repoInfo = await getRepo(
+      req.user!.githubAccessToken,
+      owner,
+      repoName,
+    );
+
+    const result = await createStrategyPullRequest({
+      accessToken: req.user!.githubAccessToken,
+      owner,
+      repo: repoName,
+      baseBranch: repoInfo.defaultBranch,
+      branchName: `axiom/${slugify(strategy.title)}-${strategy.id.toLowerCase()}`,
+      commitMessage: `perf: ${strategy.title}`,
+      prTitle: `[Axiom] ${strategy.title}`,
+      prBody: buildPrBody({
+        routeLabel: `${route.method} ${route.routePath}`,
+        strategy,
+        candidateResult,
+      }),
+      changes: strategy.changes,
+    });
+
+    res.status(201).json(result);
+  } catch (err) {
+    console.error("Failed to create PR:", err);
+    if (err instanceof PrCreationError) {
+      return res
+        .status(422)
+        .json({ error: err.message, filePath: err.filePath });
+    }
+    const status = (err as any)?.status;
+    if (status === 403) {
+      return res.status(403).json({
+        error:
+          "GitHub rejected the request — the token likely lacks `repo` write scope.",
+      });
+    }
+    if (status === 404) {
+      return res.status(404).json({
+        error: "GitHub repo/branch not found, or the token lacks access.",
+      });
+    }
+    res.status(502).json({
+      error:
+        err instanceof Error ? err.message : "Failed to create pull request",
+    });
+  }
+});
 
 export default router;

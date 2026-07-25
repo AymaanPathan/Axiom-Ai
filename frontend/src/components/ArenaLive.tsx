@@ -26,6 +26,8 @@ import {
   Activity,
   TrendingUp,
   PieChart as PieIcon,
+  GitPullRequestArrow,
+  ExternalLink,
 } from "lucide-react";
 import {
   AreaChart,
@@ -44,8 +46,14 @@ import type {
   OptimizationStrategy,
   ArenaResult,
   ArenaCandidateResult,
+  FileChange,
 } from "../api/repos";
-import { initArena, runArenaCandidate, finalizeArena } from "../api/repos";
+import {
+  initArena,
+  runArenaCandidate,
+  finalizeArena,
+  createPullRequestForStrategy,
+} from "../api/repos";
 import {
   useArenaStream,
   type CandidateLiveState,
@@ -90,7 +98,7 @@ const PIPELINE: { stage: string; label: string; icon: typeof Copy }[] = [
 const STAGE_MESSAGE: Record<string, string> = {
   queued: "Waiting to be started…",
   copying: "Copying the repo into an isolated sandbox…",
-  patching: "Applying this strategy's diff…",
+  patching: "Applying this strategy's changes…",
   provisioning: "Booting an isolated container…",
   healthcheck: "Waiting for the app to come up…",
   benchmarking: "Sending live traffic and measuring…",
@@ -345,7 +353,12 @@ export default function ArenaLive({
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6 lg:px-10">
         {finalResult ? (
           <div className="mx-auto max-w-6xl">
-            <FinalBoard result={finalResult} strategies={strategies} />
+            <FinalBoard
+              result={finalResult}
+              strategies={strategies}
+              repositoryId={repositoryId}
+              routeIndex={routeIndex}
+            />
           </div>
         ) : (
           <>
@@ -392,7 +405,10 @@ export default function ArenaLive({
                   <button
                     onClick={handleNextStrategy}
                     className="rounded-lg border px-4 py-2 text-[12.5px] font-semibold transition-colors"
-                    style={{ borderColor: BORDER_STRONG, color: TEXT_SECONDARY }}
+                    style={{
+                      borderColor: BORDER_STRONG,
+                      color: TEXT_SECONDARY,
+                    }}
                   >
                     Test next strategy →
                   </button>
@@ -570,11 +586,14 @@ function RaceStrip({
 }
 
 // ---------------------------------------------------------------------------
-// Diff viewer
+// Diff viewer — now per-file-change instead of per-strategy, since a
+// strategy can touch multiple files. Handles both "modify" (red/green
+// snippet replace) and "create" (all-green, no red block, "New file" tag).
 // ---------------------------------------------------------------------------
-function DiffViewer({ strategy }: { strategy: OptimizationStrategy }) {
-  const oldLines = strategy.diff.originalCode.split("\n");
-  const newLines = strategy.diff.newCode.split("\n");
+function SingleFileDiff({ change }: { change: FileChange }) {
+  const isCreate = change.changeType === "create";
+  const oldLines = isCreate ? [] : (change.originalCode ?? "").split("\n");
+  const newLines = change.newCode.split("\n");
 
   return (
     <div
@@ -590,24 +609,35 @@ function DiffViewer({ strategy }: { strategy: OptimizationStrategy }) {
           className="text-[12px] font-medium"
           style={{ color: TEXT_SECONDARY, fontFamily: MONO }}
         >
-          {strategy.diff.filePath}
+          {change.filePath}
+        </span>
+        <span
+          className="ml-auto rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.05em]"
+          style={{
+            background: isCreate ? "#12321f" : "#ffffff14",
+            color: isCreate ? LIVE : TEXT_SECONDARY,
+          }}
+        >
+          {isCreate ? "New file" : "Modified"}
         </span>
       </div>
       <div style={{ background: "#0a0a0a" }}>
-        <div className="border-b" style={{ borderColor: "#2a1414" }}>
-          {oldLines.map((line, i) => (
-            <div
-              key={`old-${i}`}
-              className="flex px-4 py-0.5 text-[12px] leading-[1.6]"
-              style={{ background: "#2a141480", fontFamily: MONO }}
-            >
-              <span className="mr-3 select-none" style={{ color: "#c85a5a" }}>
-                −
-              </span>
-              <span style={{ color: "#e0a0a0" }}>{line || " "}</span>
-            </div>
-          ))}
-        </div>
+        {!isCreate && (
+          <div className="border-b" style={{ borderColor: "#2a1414" }}>
+            {oldLines.map((line, i) => (
+              <div
+                key={`old-${i}`}
+                className="flex px-4 py-0.5 text-[12px] leading-[1.6]"
+                style={{ background: "#2a141480", fontFamily: MONO }}
+              >
+                <span className="mr-3 select-none" style={{ color: "#c85a5a" }}>
+                  −
+                </span>
+                <span style={{ color: "#e0a0a0" }}>{line || " "}</span>
+              </div>
+            ))}
+          </div>
+        )}
         <div>
           {newLines.map((line, i) => (
             <div
@@ -623,6 +653,18 @@ function DiffViewer({ strategy }: { strategy: OptimizationStrategy }) {
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+// Renders every file change for a strategy, stacked. A strategy might be a
+// single modified file, or a mix of new files + modified ones.
+function StrategyDiffs({ strategy }: { strategy: OptimizationStrategy }) {
+  return (
+    <div className="flex flex-col gap-4">
+      {strategy.changes.map((c) => (
+        <SingleFileDiff key={c.filePath} change={c} />
+      ))}
     </div>
   );
 }
@@ -764,7 +806,12 @@ function LatencyPanel({
       : undefined;
 
   return (
-    <MonitorPanel icon={Gauge} title="Latency / request" value={value} isLive={isLive}>
+    <MonitorPanel
+      icon={Gauge}
+      title="Latency / request"
+      value={value}
+      isLive={isLive}
+    >
       {chartData.length > 1 ? (
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={chartData}>
@@ -841,7 +888,12 @@ function ThroughputPanel({
               }}
               formatter={(v: number) => [`${v}`, "req/s"]}
             />
-            <Bar dataKey="rps" fill={GOLD} radius={[2, 2, 0, 0]} isAnimationActive={false} />
+            <Bar
+              dataKey="rps"
+              fill={GOLD}
+              radius={[2, 2, 0, 0]}
+              isAnimationActive={false}
+            />
           </BarChart>
         </ResponsiveContainer>
       ) : (
@@ -885,13 +937,25 @@ function StatusDistributionPanel({
               style={{ width: `${okPct}%`, background: LIVE }}
             />
           </div>
-          <div className="flex items-center justify-between text-[11px]" style={{ fontFamily: MONO }}>
+          <div
+            className="flex items-center justify-between text-[11px]"
+            style={{ fontFamily: MONO }}
+          >
             <span className="flex items-center gap-1.5" style={{ color: LIVE }}>
-              <span className="h-2 w-2 rounded-full" style={{ background: LIVE }} />
+              <span
+                className="h-2 w-2 rounded-full"
+                style={{ background: LIVE }}
+              />
               {okCount} success
             </span>
-            <span className="flex items-center gap-1.5" style={{ color: errCount > 0 ? ERROR : TEXT_QUIET }}>
-              <span className="h-2 w-2 rounded-full" style={{ background: errCount > 0 ? ERROR : TEXT_QUIET }} />
+            <span
+              className="flex items-center gap-1.5"
+              style={{ color: errCount > 0 ? ERROR : TEXT_QUIET }}
+            >
+              <span
+                className="h-2 w-2 rounded-full"
+                style={{ background: errCount > 0 ? ERROR : TEXT_QUIET }}
+              />
               {errCount} error
             </span>
           </div>
@@ -958,7 +1022,13 @@ function ResourcePanel({
 // ---------------------------------------------------------------------------
 // SigNoz telemetry panel
 // ---------------------------------------------------------------------------
-function TelemetryPanel({ live, isLive }: { live?: CandidateLiveState; isLive: boolean }) {
+function TelemetryPanel({
+  live,
+  isLive,
+}: {
+  live?: CandidateLiveState;
+  isLive: boolean;
+}) {
   const chartData = useMemo(
     () =>
       (live?.telemetryHistory ?? []).map((t, i) => ({
@@ -1016,8 +1086,22 @@ function TelemetryPanel({ live, isLive }: { live?: CandidateLiveState; isLive: b
                   fontFamily: MONO,
                 }}
               />
-              <Line type="monotone" dataKey="p50" stroke={TEXT_TERTIARY} dot={false} strokeWidth={1.5} isAnimationActive={false} />
-              <Line type="monotone" dataKey="p95" stroke={LIVE} dot={false} strokeWidth={1.75} isAnimationActive={false} />
+              <Line
+                type="monotone"
+                dataKey="p50"
+                stroke={TEXT_TERTIARY}
+                dot={false}
+                strokeWidth={1.5}
+                isAnimationActive={false}
+              />
+              <Line
+                type="monotone"
+                dataKey="p95"
+                stroke={LIVE}
+                dot={false}
+                strokeWidth={1.75}
+                isAnimationActive={false}
+              />
             </LineChart>
           </ResponsiveContainer>
         ) : (
@@ -1069,7 +1153,11 @@ function StatusPill({ stage }: { stage: string }) {
 // ---------------------------------------------------------------------------
 // Per-request table
 // ---------------------------------------------------------------------------
-function RequestLogTable({ entries }: { entries: CandidateLiveState["requestLog"] }) {
+function RequestLogTable({
+  entries,
+}: {
+  entries: CandidateLiveState["requestLog"];
+}) {
   if (entries.length === 0) {
     return (
       <p
@@ -1081,31 +1169,78 @@ function RequestLogTable({ entries }: { entries: CandidateLiveState["requestLog"
     );
   }
   return (
-    <div className="max-h-72 overflow-y-auto rounded-lg border" style={{ borderColor: BORDER }}>
+    <div
+      className="max-h-72 overflow-y-auto rounded-lg border"
+      style={{ borderColor: BORDER }}
+    >
       <table className="w-full text-[11.5px]" style={{ fontFamily: MONO }}>
         <thead>
           <tr className="sticky top-0" style={{ background: SURFACE_RAISED }}>
-            <th className="px-3 py-1.5 text-left font-semibold" style={{ color: TEXT_TERTIARY }}>#</th>
-            <th className="px-3 py-1.5 text-left font-semibold" style={{ color: TEXT_TERTIARY }}>Method</th>
-            <th className="px-3 py-1.5 text-left font-semibold" style={{ color: TEXT_TERTIARY }}>URL</th>
-            <th className="px-3 py-1.5 text-left font-semibold" style={{ color: TEXT_TERTIARY }}>Status</th>
-            <th className="px-3 py-1.5 text-right font-semibold" style={{ color: TEXT_TERTIARY }}>Duration</th>
+            <th
+              className="px-3 py-1.5 text-left font-semibold"
+              style={{ color: TEXT_TERTIARY }}
+            >
+              #
+            </th>
+            <th
+              className="px-3 py-1.5 text-left font-semibold"
+              style={{ color: TEXT_TERTIARY }}
+            >
+              Method
+            </th>
+            <th
+              className="px-3 py-1.5 text-left font-semibold"
+              style={{ color: TEXT_TERTIARY }}
+            >
+              URL
+            </th>
+            <th
+              className="px-3 py-1.5 text-left font-semibold"
+              style={{ color: TEXT_TERTIARY }}
+            >
+              Status
+            </th>
+            <th
+              className="px-3 py-1.5 text-right font-semibold"
+              style={{ color: TEXT_TERTIARY }}
+            >
+              Duration
+            </th>
           </tr>
         </thead>
         <tbody>
-          {[...entries].slice(-100).reverse().map((r) => (
-            <tr key={r.index} style={{ borderTop: `1px solid ${BORDER}` }}>
-              <td className="px-3 py-1.5" style={{ color: TEXT_QUIET }}>{r.index}</td>
-              <td className="px-3 py-1.5" style={{ color: TEXT_TERTIARY }}>{r.method ?? "—"}</td>
-              <td className="max-w-[320px] truncate px-3 py-1.5" style={{ color: TEXT_SECONDARY }} title={r.url ?? undefined}>
-                {r.url ?? "—"}
-              </td>
-              <td className="px-3 py-1.5 font-semibold" style={{ color: r.ok ? LIVE : ERROR }}>{r.status}</td>
-              <td className="px-3 py-1.5 text-right" style={{ color: TEXT_SECONDARY }}>
-                {r.durationMs != null ? `${r.durationMs}ms` : "—"}
-              </td>
-            </tr>
-          ))}
+          {[...entries]
+            .slice(-100)
+            .reverse()
+            .map((r) => (
+              <tr key={r.index} style={{ borderTop: `1px solid ${BORDER}` }}>
+                <td className="px-3 py-1.5" style={{ color: TEXT_QUIET }}>
+                  {r.index}
+                </td>
+                <td className="px-3 py-1.5" style={{ color: TEXT_TERTIARY }}>
+                  {r.method ?? "—"}
+                </td>
+                <td
+                  className="max-w-[320px] truncate px-3 py-1.5"
+                  style={{ color: TEXT_SECONDARY }}
+                  title={r.url ?? undefined}
+                >
+                  {r.url ?? "—"}
+                </td>
+                <td
+                  className="px-3 py-1.5 font-semibold"
+                  style={{ color: r.ok ? LIVE : ERROR }}
+                >
+                  {r.status}
+                </td>
+                <td
+                  className="px-3 py-1.5 text-right"
+                  style={{ color: TEXT_SECONDARY }}
+                >
+                  {r.durationMs != null ? `${r.durationMs}ms` : "—"}
+                </td>
+              </tr>
+            ))}
         </tbody>
       </table>
     </div>
@@ -1139,7 +1274,10 @@ function FocusedCandidate({
 }) {
   const stage = live?.stage ?? (result ? result.status : "queued");
   const failed = stage === "failed";
-  const isLive = stage === "benchmarking" || stage === "healthcheck" || stage === "provisioning";
+  const isLive =
+    stage === "benchmarking" ||
+    stage === "healthcheck" ||
+    stage === "provisioning";
   const idx = stageIndex(stage);
   const elapsed = useElapsed(
     !!live && stage !== "queued" && !result,
@@ -1147,7 +1285,12 @@ function FocusedCandidate({
   );
 
   const resourceChartData = useMemo(
-    () => (live?.metrics ?? []).map((m, i) => ({ i, cpu: m.cpuPercent, mem: m.memoryMB })),
+    () =>
+      (live?.metrics ?? []).map((m, i) => ({
+        i,
+        cpu: m.cpuPercent,
+        mem: m.memoryMB,
+      })),
     [live?.metrics],
   );
   const latestMetric = live?.metrics[live.metrics.length - 1];
@@ -1159,6 +1302,9 @@ function FocusedCandidate({
   }, [live?.logs.length]);
 
   const hasStarted = !!live || !!result;
+  const createdCount = strategy.changes.filter(
+    (c) => c.changeType === "create",
+  ).length;
 
   return (
     <div
@@ -1214,7 +1360,11 @@ function FocusedCandidate({
           {stage !== "queued" && !result && (
             <span
               className="flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium"
-              style={{ borderColor: BORDER_STRONG, color: TEXT_SECONDARY, fontFamily: MONO }}
+              style={{
+                borderColor: BORDER_STRONG,
+                color: TEXT_SECONDARY,
+                fontFamily: MONO,
+              }}
             >
               <Clock size={11} />
               {fmtElapsed(elapsed)}
@@ -1227,16 +1377,21 @@ function FocusedCandidate({
       {!hasStarted && (
         <div className="flex flex-col items-start gap-3 px-6 py-6">
           <p className="text-[13px]" style={{ color: TEXT_SECONDARY }}>
-            This strategy hasn't been tested yet. Running it will patch the
-            code, boot an isolated container, and send live traffic against
-            it using the same script generated earlier.
+            This strategy hasn't been tested yet. Running it will apply its
+            {strategy.changes.length > 1 ? " file changes" : " change"}, boot an
+            isolated container, and send live traffic against it using the same
+            script generated earlier.
           </p>
           <button
             onClick={onRun}
             disabled={!canRun || isRunning}
             className="flex items-center gap-1.5 rounded-lg bg-white px-4 py-2 text-[12.5px] font-bold text-black transition-colors hover:bg-[#e5e5e5] disabled:opacity-40"
           >
-            {isRunning ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
+            {isRunning ? (
+              <Loader2 size={13} className="animate-spin" />
+            ) : (
+              <Play size={13} />
+            )}
             {isRunning ? "Starting…" : "Run this strategy"}
           </button>
         </div>
@@ -1265,11 +1420,19 @@ function FocusedCandidate({
                       ? ERROR
                       : TEXT_QUIET;
               return (
-                <div key={step.stage} className="flex flex-1 items-center gap-1.5">
+                <div
+                  key={step.stage}
+                  className="flex flex-1 items-center gap-1.5"
+                >
                   <div className="flex flex-col items-center gap-1.5">
                     <div
                       className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border"
-                      style={{ borderColor: color, color, background: stepState === "active" ? "#ffffff0d" : "transparent" }}
+                      style={{
+                        borderColor: color,
+                        color,
+                        background:
+                          stepState === "active" ? "#ffffff0d" : "transparent",
+                      }}
                     >
                       {stepState === "active" ? (
                         <Loader2 size={13} className="animate-spin" />
@@ -1286,7 +1449,10 @@ function FocusedCandidate({
                   {i < PIPELINE.length - 1 && (
                     <div
                       className="mb-4 h-px flex-1"
-                      style={{ background: i < idx || stage === "completed" ? LIVE : BORDER }}
+                      style={{
+                        background:
+                          i < idx || stage === "completed" ? LIVE : BORDER,
+                      }}
                     />
                   )}
                 </div>
@@ -1298,7 +1464,11 @@ function FocusedCandidate({
             className="px-6 pb-1 pt-4 text-[13px]"
             style={{ color: failed ? ERROR : TEXT_SECONDARY }}
           >
-            {failed ? (live?.error ?? result?.error ?? "Failed") : result ? "Finished." : STAGE_MESSAGE[stage]}
+            {failed
+              ? (live?.error ?? result?.error ?? "Failed")
+              : result
+                ? "Finished."
+                : STAGE_MESSAGE[stage]}
           </p>
 
           {failed && (
@@ -1307,7 +1477,11 @@ function FocusedCandidate({
                 className="flex items-start gap-2 rounded-xl border px-4 py-3"
                 style={{ borderColor: ERROR, background: "#2a1414" }}
               >
-                <AlertTriangle size={15} style={{ color: ERROR }} className="mt-0.5 shrink-0" />
+                <AlertTriangle
+                  size={15}
+                  style={{ color: ERROR }}
+                  className="mt-0.5 shrink-0"
+                />
                 <p className="text-[13px]" style={{ color: "#e0a0a0" }}>
                   {live?.error ?? result?.error}
                 </p>
@@ -1375,20 +1549,38 @@ function FocusedCandidate({
               <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
                 <MiniStat
                   label="Avg"
-                  value={result.runResult ? `${Math.round(result.runResult.avgDurationMs)}ms` : "—"}
+                  value={
+                    result.runResult
+                      ? `${Math.round(result.runResult.avgDurationMs)}ms`
+                      : "—"
+                  }
                 />
                 <MiniStat
                   label="p95"
-                  value={result.runResult?.p95DurationMs != null ? `${Math.round(result.runResult.p95DurationMs)}ms` : "—"}
+                  value={
+                    result.runResult?.p95DurationMs != null
+                      ? `${Math.round(result.runResult.p95DurationMs)}ms`
+                      : "—"
+                  }
                 />
                 <MiniStat
                   label="Errors"
-                  value={result.runResult ? String(result.runResult.errorCount) : "—"}
-                  accent={result.runResult && result.runResult.errorCount > 0 ? ERROR : undefined}
+                  value={
+                    result.runResult ? String(result.runResult.errorCount) : "—"
+                  }
+                  accent={
+                    result.runResult && result.runResult.errorCount > 0
+                      ? ERROR
+                      : undefined
+                  }
                 />
                 <MiniStat
                   label="Requests"
-                  value={result.runResult ? String(result.runResult.requestsSent) : "—"}
+                  value={
+                    result.runResult
+                      ? String(result.runResult.requestsSent)
+                      : "—"
+                  }
                 />
               </div>
             </div>
@@ -1398,9 +1590,16 @@ function FocusedCandidate({
           <div className="px-6 pt-6">
             <span
               className="flex w-fit items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11.5px]"
-              style={{ borderColor: BORDER_STRONG, color: TEXT_SECONDARY, fontFamily: MONO }}
+              style={{
+                borderColor: BORDER_STRONG,
+                color: TEXT_SECONDARY,
+                fontFamily: MONO,
+              }}
             >
-              <FileCode size={11} style={{ color: TEXT_TERTIARY }} />1 file changed · {strategy.diff.filePath}
+              <FileCode size={11} style={{ color: TEXT_TERTIARY }} />
+              {strategy.changes.length} file
+              {strategy.changes.length !== 1 ? "s" : ""} changed
+              {createdCount > 0 && ` · ${createdCount} new`}
             </span>
           </div>
 
@@ -1411,9 +1610,9 @@ function FocusedCandidate({
                 style={{ color: TEXT_TERTIARY }}
               >
                 <GitBranch size={12} />
-                Code change
+                Code change{strategy.changes.length !== 1 ? "s" : ""}
               </div>
-              <DiffViewer strategy={strategy} />
+              <StrategyDiffs strategy={strategy} />
             </div>
 
             <div>
@@ -1442,7 +1641,10 @@ function FocusedCandidate({
               style={{ borderColor: BORDER, background: "#0a0a0a" }}
             >
               {!live || live.logs.length === 0 ? (
-                <p className="text-[12px]" style={{ color: TEXT_QUIET, fontFamily: MONO }}>
+                <p
+                  className="text-[12px]"
+                  style={{ color: TEXT_QUIET, fontFamily: MONO }}
+                >
                   {result ? "Run finished." : "Waiting for output…"}
                 </p>
               ) : (
@@ -1465,7 +1667,112 @@ function FocusedCandidate({
 }
 
 // ---------------------------------------------------------------------------
-// Final board — unchanged
+// Create-PR button — an isolated, self-contained control so its loading /
+// success / error state never touches the row's own expand/collapse state.
+// Renders inside a plain <div>, never inside a <button>, since the row
+// header below is now a div[role=button] instead of a real <button> to
+// allow this to nest safely.
+// ---------------------------------------------------------------------------
+type PrState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "done"; prUrl: string; prNumber: number }
+  | { status: "error"; message: string };
+
+function CreatePrButton({
+  repositoryId,
+  routeIndex,
+  strategy,
+  candidateResult,
+}: {
+  repositoryId: string;
+  routeIndex: number;
+  strategy: OptimizationStrategy;
+  candidateResult: ArenaCandidateResult;
+}) {
+  const [state, setState] = useState<PrState>({ status: "idle" });
+
+  const handleClick = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (state.status === "loading") return;
+    setState({ status: "loading" });
+    try {
+      const result = await createPullRequestForStrategy(
+        repositoryId,
+        routeIndex,
+        strategy,
+        candidateResult,
+      );
+      setState({
+        status: "done",
+        prUrl: result.prUrl,
+        prNumber: result.prNumber,
+      });
+    } catch (err: any) {
+      setState({
+        status: "error",
+        message:
+          err?.response?.data?.error ??
+          (err instanceof Error ? err.message : "Failed to create PR"),
+      });
+    }
+  };
+
+  if (state.status === "done") {
+    return (
+      <a
+        href={state.prUrl}
+        target="_blank"
+        rel="noreferrer"
+        onClick={(e) => e.stopPropagation()}
+        className="flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[11.5px] font-bold transition-colors"
+        style={{ borderColor: LIVE, color: LIVE, background: "#12321f" }}
+      >
+        <GitPullRequestArrow size={13} />
+        PR #{state.prNumber}
+        <ExternalLink size={11} />
+      </a>
+    );
+  }
+
+  return (
+    <div
+      className="flex shrink-0 items-center gap-2"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <button
+        onClick={handleClick}
+        disabled={state.status === "loading"}
+        className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[11.5px] font-bold transition-colors disabled:opacity-50"
+        style={{ borderColor: BORDER_STRONG, color: TEXT_PRIMARY }}
+      >
+        {state.status === "loading" ? (
+          <Loader2 size={13} className="animate-spin" />
+        ) : (
+          <GitPullRequestArrow size={13} />
+        )}
+        {state.status === "loading" ? "Opening PR…" : "Open PR"}
+      </button>
+      {state.status === "error" && (
+        <span
+          className="max-w-[220px] truncate text-[11px]"
+          style={{ color: ERROR }}
+          title={state.message}
+        >
+          {state.message}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Final board — unchanged in structure, diff tab now renders all file
+// changes for the winning/selected strategy instead of a single one.
+// Now also accepts repositoryId/routeIndex so each row can open a real
+// GitHub PR for its strategy. The row's clickable header is a
+// div[role=button] instead of a <button> so the PR control (a real
+// <button>/<a>) can be nested inside it without violating HTML rules.
 // ---------------------------------------------------------------------------
 const RANK_ICON_COLOR = [GOLD, "#c9cad0", "#c98a4d"];
 type Tab = "overview" | "diff" | "metrics";
@@ -1473,9 +1780,13 @@ type Tab = "overview" | "diff" | "metrics";
 function FinalBoard({
   result,
   strategies,
+  repositoryId,
+  routeIndex,
 }: {
   result: ArenaResult;
   strategies: OptimizationStrategy[];
+  repositoryId: string;
+  routeIndex: number;
 }) {
   const strategyById = useMemo(
     () => Object.fromEntries(strategies.map((s) => [s.id, s])),
@@ -1487,7 +1798,9 @@ function FinalBoard({
     return (b.score ?? -Infinity) - (a.score ?? -Infinity);
   });
 
-  const [expandedId, setExpandedId] = useState<string | null>(result.winnerStrategyId);
+  const [expandedId, setExpandedId] = useState<string | null>(
+    result.winnerStrategyId,
+  );
   const [tabById, setTabById] = useState<Record<string, Tab>>({});
 
   return (
@@ -1511,6 +1824,9 @@ function FinalBoard({
           const expanded = expandedId === c.strategyId;
           const tab = tabById[c.strategyId] ?? "overview";
 
+          const toggleExpanded = () =>
+            setExpandedId(expanded ? null : c.strategyId);
+
           return (
             <div
               key={c.strategyId}
@@ -1521,22 +1837,43 @@ function FinalBoard({
                 animation: `arenaRowIn 320ms ease-out ${i * 80}ms forwards`,
               }}
             >
-              <button
-                onClick={() => setExpandedId(expanded ? null : c.strategyId)}
-                className="flex w-full flex-wrap items-center gap-x-6 gap-y-2 px-5 py-4 text-left"
+              {/* Row header — div[role=button] instead of <button> so the
+                  nested CreatePrButton (a real <button>/<a>) is valid HTML
+                  and doesn't trigger a second, conflicting click target. */}
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={toggleExpanded}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    toggleExpanded();
+                  }
+                }}
+                className="flex w-full cursor-pointer flex-wrap items-center gap-x-6 gap-y-2 px-5 py-4 text-left"
               >
                 <div className="flex min-w-[190px] flex-1 items-center gap-3">
                   <span
                     className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-[12px] font-bold"
                     style={{ borderColor: BORDER_STRONG, color: rankColor }}
                   >
-                    {failed ? <XCircle size={15} style={{ color: ERROR }} /> : i + 1}
+                    {failed ? (
+                      <XCircle size={15} style={{ color: ERROR }} />
+                    ) : (
+                      i + 1
+                    )}
                   </span>
                   <div className="min-w-0">
-                    <div className="truncate text-[14px] font-semibold" style={{ color: TEXT_PRIMARY, fontFamily: MONO }}>
+                    <div
+                      className="truncate text-[14px] font-semibold"
+                      style={{ color: TEXT_PRIMARY, fontFamily: MONO }}
+                    >
                       {c.title || strategy?.title}
                     </div>
-                    <div className="text-[10.5px]" style={{ color: TEXT_TERTIARY }}>
+                    <div
+                      className="text-[10.5px]"
+                      style={{ color: TEXT_TERTIARY }}
+                    >
                       Strategy {c.strategyId}
                       {strategy && ` · ${strategy.approach}`}
                     </div>
@@ -1556,45 +1893,106 @@ function FinalBoard({
                     Failed: {c.error}
                   </span>
                 ) : (
-                  <div className="flex flex-wrap items-center gap-4 text-[13px]" style={{ fontFamily: MONO }}>
-                    <Metric label="avg" value={c.runResult ? `${Math.round(c.runResult.avgDurationMs)}ms` : "—"} />
-                    <Metric label="p95" value={c.runResult?.p95DurationMs != null ? `${Math.round(c.runResult.p95DurationMs)}ms` : "—"} />
-                    <Metric label="errors" value={c.runResult ? String(c.runResult.errorCount) : "—"} />
-                    {c.cpuPercent != null && <Metric icon={Cpu} label="cpu" value={`${c.cpuPercent}%`} />}
-                    {c.memoryMB != null && <Metric icon={MemoryStick} label="mem" value={`${Math.round(c.memoryMB)}MB`} />}
+                  <div
+                    className="flex flex-wrap items-center gap-4 text-[13px]"
+                    style={{ fontFamily: MONO }}
+                  >
+                    <Metric
+                      label="avg"
+                      value={
+                        c.runResult
+                          ? `${Math.round(c.runResult.avgDurationMs)}ms`
+                          : "—"
+                      }
+                    />
+                    <Metric
+                      label="p95"
+                      value={
+                        c.runResult?.p95DurationMs != null
+                          ? `${Math.round(c.runResult.p95DurationMs)}ms`
+                          : "—"
+                      }
+                    />
+                    <Metric
+                      label="errors"
+                      value={c.runResult ? String(c.runResult.errorCount) : "—"}
+                    />
+                    {c.cpuPercent != null && (
+                      <Metric
+                        icon={Cpu}
+                        label="cpu"
+                        value={`${c.cpuPercent}%`}
+                      />
+                    )}
+                    {c.memoryMB != null && (
+                      <Metric
+                        icon={MemoryStick}
+                        label="mem"
+                        value={`${Math.round(c.memoryMB)}MB`}
+                      />
+                    )}
                     <span
                       className="ml-1 rounded-lg border px-3 py-1.5 font-bold"
-                      style={{ borderColor: isWinner ? GOLD : BORDER_STRONG, color: isWinner ? GOLD : TEXT_PRIMARY }}
+                      style={{
+                        borderColor: isWinner ? GOLD : BORDER_STRONG,
+                        color: isWinner ? GOLD : TEXT_PRIMARY,
+                      }}
                     >
                       score {c.score ?? "—"}
                     </span>
                   </div>
                 )}
 
-                <ChevronDown
-                  size={16}
-                  className="shrink-0 transition-transform"
-                  style={{ color: TEXT_TERTIARY, transform: expanded ? "rotate(180deg)" : "none" }}
-                />
-              </button>
+                <div className="ml-auto flex shrink-0 items-center gap-3">
+                  {!failed && strategy && (
+                    <CreatePrButton
+                      repositoryId={repositoryId}
+                      routeIndex={routeIndex}
+                      strategy={strategy}
+                      candidateResult={c}
+                    />
+                  )}
+
+                  <ChevronDown
+                    size={16}
+                    className="shrink-0 transition-transform"
+                    style={{
+                      color: TEXT_TERTIARY,
+                      transform: expanded ? "rotate(180deg)" : "none",
+                    }}
+                  />
+                </div>
+              </div>
 
               {expanded && (
-                <div className="border-t px-5 py-5" style={{ borderColor: BORDER }}>
+                <div
+                  className="border-t px-5 py-5"
+                  style={{ borderColor: BORDER }}
+                >
                   <div className="mb-4 flex items-center gap-1">
                     {(["overview", "diff", "metrics"] as Tab[]).map((t) => (
                       <button
                         key={t}
-                        onClick={() => setTabById((prev) => ({ ...prev, [c.strategyId]: t }))}
+                        onClick={() =>
+                          setTabById((prev) => ({ ...prev, [c.strategyId]: t }))
+                        }
                         className="rounded-lg px-3 py-1.5 text-[11.5px] font-semibold capitalize transition-colors"
-                        style={{ background: tab === t ? "#ffffff14" : "transparent", color: tab === t ? TEXT_PRIMARY : TEXT_TERTIARY }}
+                        style={{
+                          background: tab === t ? "#ffffff14" : "transparent",
+                          color: tab === t ? TEXT_PRIMARY : TEXT_TERTIARY,
+                        }}
                       >
                         {t === "diff" ? "Code change" : t}
                       </button>
                     ))}
                   </div>
 
-                  {tab === "overview" && <OverviewTab candidate={c} strategy={strategy} />}
-                  {tab === "diff" && strategy && <DiffViewer strategy={strategy} />}
+                  {tab === "overview" && (
+                    <OverviewTab candidate={c} strategy={strategy} />
+                  )}
+                  {tab === "diff" && strategy && (
+                    <StrategyDiffs strategy={strategy} />
+                  )}
                   {tab === "metrics" && <MetricsTab candidate={c} />}
                 </div>
               )}
@@ -1629,15 +2027,24 @@ function OverviewTab({
     <div className="flex flex-col gap-5">
       {strategy && (
         <div>
-          <div className="mb-1.5 flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-[0.06em]" style={{ color: TEXT_TERTIARY }}>
+          <div
+            className="mb-1.5 flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-[0.06em]"
+            style={{ color: TEXT_TERTIARY }}
+          >
             <Sparkles size={12} style={{ color: GOLD }} />
             Why this works
           </div>
-          <p className="text-[13.5px] leading-[1.65]" style={{ color: TEXT_SECONDARY }}>
+          <p
+            className="text-[13.5px] leading-[1.65]"
+            style={{ color: TEXT_SECONDARY }}
+          >
             {strategy.description}
           </p>
           {improvementPct && (
-            <div className="mt-2 inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11.5px] font-bold" style={{ background: "#fff", color: "#0a0a0a" }}>
+            <div
+              className="mt-2 inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11.5px] font-bold"
+              style={{ background: "#fff", color: "#0a0a0a" }}
+            >
               Estimated +{improvementPct} · {strategy.confidence} confidence
             </div>
           )}
@@ -1645,20 +2052,50 @@ function OverviewTab({
       )}
 
       {candidate.status === "failed" ? (
-        <div className="flex items-start gap-2 rounded-xl border px-4 py-3" style={{ borderColor: ERROR, background: "#2a1414" }}>
-          <AlertTriangle size={15} style={{ color: ERROR }} className="mt-0.5 shrink-0" />
-          <p className="text-[13px]" style={{ color: "#e0a0a0" }}>{candidate.error}</p>
+        <div
+          className="flex items-start gap-2 rounded-xl border px-4 py-3"
+          style={{ borderColor: ERROR, background: "#2a1414" }}
+        >
+          <AlertTriangle
+            size={15}
+            style={{ color: ERROR }}
+            className="mt-0.5 shrink-0"
+          />
+          <p className="text-[13px]" style={{ color: "#e0a0a0" }}>
+            {candidate.error}
+          </p>
         </div>
       ) : (
         <div>
-          <div className="mb-2 text-[10.5px] font-bold uppercase tracking-[0.06em]" style={{ color: TEXT_TERTIARY }}>
+          <div
+            className="mb-2 text-[10.5px] font-bold uppercase tracking-[0.06em]"
+            style={{ color: TEXT_TERTIARY }}
+          >
             Load test results
           </div>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <StatBox label="Avg latency" value={rr ? `${Math.round(rr.avgDurationMs)}ms` : "—"} />
-            <StatBox label="p95 latency" value={rr?.p95DurationMs != null ? `${Math.round(rr.p95DurationMs)}ms` : "—"} />
-            <StatBox label="Errors" value={rr ? String(rr.errorCount) : "—"} accent={rr && rr.errorCount > 0 ? ERROR : undefined} />
-            <StatBox label="File changed" value={strategy ? "1" : "—"} sub={strategy?.diff.filePath} />
+            <StatBox
+              label="Avg latency"
+              value={rr ? `${Math.round(rr.avgDurationMs)}ms` : "—"}
+            />
+            <StatBox
+              label="p95 latency"
+              value={
+                rr?.p95DurationMs != null
+                  ? `${Math.round(rr.p95DurationMs)}ms`
+                  : "—"
+              }
+            />
+            <StatBox
+              label="Errors"
+              value={rr ? String(rr.errorCount) : "—"}
+              accent={rr && rr.errorCount > 0 ? ERROR : undefined}
+            />
+            <StatBox
+              label="Files changed"
+              value={strategy ? String(strategy.changes.length) : "—"}
+              sub={strategy?.changes.map((c) => c.filePath).join(", ")}
+            />
           </div>
         </div>
       )}
@@ -1678,15 +2115,27 @@ function StatBox({
   accent?: string;
 }) {
   return (
-    <div className="rounded-xl border px-3.5 py-3" style={{ borderColor: BORDER, background: SURFACE }}>
-      <div className="text-[10px] font-semibold uppercase tracking-[0.05em]" style={{ color: TEXT_TERTIARY }}>
+    <div
+      className="rounded-xl border px-3.5 py-3"
+      style={{ borderColor: BORDER, background: SURFACE }}
+    >
+      <div
+        className="text-[10px] font-semibold uppercase tracking-[0.05em]"
+        style={{ color: TEXT_TERTIARY }}
+      >
         {label}
       </div>
-      <div className="mt-1 text-[16px] font-bold" style={{ color: accent ?? TEXT_PRIMARY, fontFamily: MONO }}>
+      <div
+        className="mt-1 text-[16px] font-bold"
+        style={{ color: accent ?? TEXT_PRIMARY, fontFamily: MONO }}
+      >
         {value}
       </div>
       {sub && (
-        <div className="mt-0.5 truncate text-[10px]" style={{ color: TEXT_QUIET, fontFamily: MONO }}>
+        <div
+          className="mt-0.5 truncate text-[10px]"
+          style={{ color: TEXT_QUIET, fontFamily: MONO }}
+        >
           {sub}
         </div>
       )}
@@ -1696,7 +2145,12 @@ function StatBox({
 
 function MetricsTab({ candidate }: { candidate: ArenaCandidateResult }) {
   const chartData = useMemo(
-    () => (candidate.metricsHistory ?? []).map((m, i) => ({ i, cpu: m.cpuPercent, mem: m.memoryMB })),
+    () =>
+      (candidate.metricsHistory ?? []).map((m, i) => ({
+        i,
+        cpu: m.cpuPercent,
+        mem: m.memoryMB,
+      })),
     [candidate.metricsHistory],
   );
 
@@ -1710,36 +2164,86 @@ function MetricsTab({ candidate }: { candidate: ArenaCandidateResult }) {
 
   return (
     <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-      <div className="rounded-xl border px-4 py-3" style={{ borderColor: BORDER, background: SURFACE }}>
-        <div className="mb-2 flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-[0.06em]" style={{ color: TEXT_TERTIARY }}>
+      <div
+        className="rounded-xl border px-4 py-3"
+        style={{ borderColor: BORDER, background: SURFACE }}
+      >
+        <div
+          className="mb-2 flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-[0.06em]"
+          style={{ color: TEXT_TERTIARY }}
+        >
           <Cpu size={12} />
           CPU over run
         </div>
         <div className="h-32">
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={chartData}>
-              <CartesianGrid stroke={BORDER} strokeDasharray="3 3" vertical={false} />
+              <CartesianGrid
+                stroke={BORDER}
+                strokeDasharray="3 3"
+                vertical={false}
+              />
               <YAxis hide domain={[0, "auto"]} />
               <XAxis hide />
-              <Tooltip contentStyle={{ background: "#0a0a0a", border: `1px solid ${BORDER_STRONG}`, fontSize: 11, fontFamily: MONO }} />
-              <Area type="monotone" dataKey="cpu" stroke={LIVE} fill={LIVE} fillOpacity={0.15} strokeWidth={1.5} isAnimationActive={false} />
+              <Tooltip
+                contentStyle={{
+                  background: "#0a0a0a",
+                  border: `1px solid ${BORDER_STRONG}`,
+                  fontSize: 11,
+                  fontFamily: MONO,
+                }}
+              />
+              <Area
+                type="monotone"
+                dataKey="cpu"
+                stroke={LIVE}
+                fill={LIVE}
+                fillOpacity={0.15}
+                strokeWidth={1.5}
+                isAnimationActive={false}
+              />
             </AreaChart>
           </ResponsiveContainer>
         </div>
       </div>
-      <div className="rounded-xl border px-4 py-3" style={{ borderColor: BORDER, background: SURFACE }}>
-        <div className="mb-2 flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-[0.06em]" style={{ color: TEXT_TERTIARY }}>
+      <div
+        className="rounded-xl border px-4 py-3"
+        style={{ borderColor: BORDER, background: SURFACE }}
+      >
+        <div
+          className="mb-2 flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-[0.06em]"
+          style={{ color: TEXT_TERTIARY }}
+        >
           <MemoryStick size={12} />
           Memory over run
         </div>
         <div className="h-32">
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={chartData}>
-              <CartesianGrid stroke={BORDER} strokeDasharray="3 3" vertical={false} />
+              <CartesianGrid
+                stroke={BORDER}
+                strokeDasharray="3 3"
+                vertical={false}
+              />
               <YAxis hide domain={[0, "auto"]} />
               <XAxis hide />
-              <Tooltip contentStyle={{ background: "#0a0a0a", border: `1px solid ${BORDER_STRONG}`, fontSize: 11, fontFamily: MONO }} />
-              <Area type="monotone" dataKey="mem" stroke={GOLD} fill={GOLD} fillOpacity={0.12} strokeWidth={1.5} isAnimationActive={false} />
+              <Tooltip
+                contentStyle={{
+                  background: "#0a0a0a",
+                  border: `1px solid ${BORDER_STRONG}`,
+                  fontSize: 11,
+                  fontFamily: MONO,
+                }}
+              />
+              <Area
+                type="monotone"
+                dataKey="mem"
+                stroke={GOLD}
+                fill={GOLD}
+                fillOpacity={0.12}
+                strokeWidth={1.5}
+                isAnimationActive={false}
+              />
             </AreaChart>
           </ResponsiveContainer>
         </div>

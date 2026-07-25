@@ -5,7 +5,7 @@ import os from "node:os";
 import net from "node:net";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { applySnippetReplace } from "./codePatch.service.js";
+import { applyStrategyChanges } from "./codePatch.service.js";
 import { startDockerRun, stopDockerRun } from "../docker/docker-run.service.js";
 import { RunModel } from "../models/run.model.js";
 import { runLoadScript } from "./loadScriptRunner.service.js";
@@ -226,13 +226,15 @@ async function runOneCandidate(opts: {
     await fs.cp(opts.sourceLocalPath, isolatedPath, { recursive: true });
 
     emitCandidateStatus(arenaId, strategy.id, "patching");
-    const patch = await applySnippetReplace(
-      isolatedPath,
-      strategy.diff.filePath,
-      strategy.diff.originalCode,
-      strategy.diff.newCode,
-    );
-    if (!patch.applied) return fail(patch.error ?? "Patch failed to apply");
+
+    const patch = await applyStrategyChanges(isolatedPath, strategy.changes);
+    if (!patch.applied) {
+      return fail(
+        patch.error
+          ? `Failed to apply "${patch.failedFilePath ?? "a file"}": ${patch.error}`
+          : "Patch failed to apply",
+      );
+    }
 
     emitCandidateStatus(arenaId, strategy.id, "provisioning");
     const hostPort = await getFreePort();
@@ -256,20 +258,20 @@ async function runOneCandidate(opts: {
     if (!ready) return fail("Container did not become healthy");
 
     emitCandidateStatus(arenaId, strategy.id, "benchmarking", { runId });
-   stopMetricsPolling = startLiveMetricsPolling(
-     arenaId,
-     strategy.id,
-     serviceName,
-     (sample) => metricsHistory.push(sample),
-   );
-   const stopTelemetryPolling = startLiveTelemetryPolling(
-     arenaId,
-     strategy.id,
-     serviceName,
-     opts.method,
-     opts.routePath,
-     Date.now(),
-   );
+    stopMetricsPolling = startLiveMetricsPolling(
+      arenaId,
+      strategy.id,
+      serviceName,
+      (sample) => metricsHistory.push(sample),
+    );
+    const stopTelemetryPolling = startLiveTelemetryPolling(
+      arenaId,
+      strategy.id,
+      serviceName,
+      opts.method,
+      opts.routePath,
+      Date.now(),
+    );
     const retargeted = retargetScriptPort(opts.script, hostPort);
     const runResult = await runLoadScript({
       repositoryId: opts.repositoryId,
@@ -299,10 +301,10 @@ async function runOneCandidate(opts: {
       console.error(`[Arena ${strategy.id}] telemetry fetch failed:`, err);
     }
 
-   let resourceMetrics = await getContainerResourceMetricsSafe(serviceName);
-   if (!resourceMetrics) {
-     resourceMetrics = await getDockerStatsFallback(serviceName);
-   }
+    let resourceMetrics = await getContainerResourceMetricsSafe(serviceName);
+    if (!resourceMetrics) {
+      resourceMetrics = await getDockerStatsFallback(serviceName);
+    }
 
     const result: ArenaCandidateResult = {
       strategyId: strategy.id,
@@ -482,7 +484,6 @@ async function getContainerResourceMetricsSafe(
   };
 }
 
-
 interface ArenaSession {
   repositoryId: string;
   userId: string;
@@ -587,7 +588,6 @@ export async function finalizeArena(arenaId: string): Promise<ArenaResult> {
   return result;
 }
 
-
 // Fallback when SigNoz's container-metrics pipeline is lagging or not
 // scraping — `docker stats` is synchronous truth, no OTEL dependency.
 async function getDockerStatsFallback(
@@ -595,7 +595,11 @@ async function getDockerStatsFallback(
 ): Promise<{ cpuPercent: number; memoryMB: number } | null> {
   return new Promise((resolve) => {
     const child = spawn("docker", [
-      "stats", "--no-stream", "--format", "{{json .}}", containerName,
+      "stats",
+      "--no-stream",
+      "--format",
+      "{{json .}}",
+      containerName,
     ]);
     let out = "";
     child.stdout.on("data", (d) => (out += d.toString()));
@@ -608,7 +612,8 @@ async function getDockerStatsFallback(
         let memoryMB = 0;
         if (m) {
           const val = parseFloat(m[1]);
-          memoryMB = m[2] === "GiB" ? val * 1024 : m[2] === "KiB" ? val / 1024 : val;
+          memoryMB =
+            m[2] === "GiB" ? val * 1024 : m[2] === "KiB" ? val / 1024 : val;
         }
         resolve({ cpuPercent, memoryMB: Math.round(memoryMB * 100) / 100 });
       } catch {
@@ -635,10 +640,17 @@ function startLiveTelemetryPolling(
     if (stopped) return;
     try {
       const t = await getRouteTelemetry(
-        serviceName, method, routePath, windowStart, Date.now(),
+        serviceName,
+        method,
+        routePath,
+        windowStart,
+        Date.now(),
       );
       if (!stopped) {
-        emitArena(arenaId, "arena:candidate:telemetry", { strategyId, telemetry: t });
+        emitArena(arenaId, "arena:candidate:telemetry", {
+          strategyId,
+          telemetry: t,
+        });
       }
     } catch {
       // keep last good value, retry next tick

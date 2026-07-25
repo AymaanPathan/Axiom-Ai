@@ -1,6 +1,9 @@
 import type { DbOperationBreakdown, RouteTelemetry } from "./signoz.service.js";
 import type { LoadScriptResult } from "./loadScriptRunner.service.js";
-import { buildDisplayDiff } from "./codePatch.service.js";
+import {
+  buildDisplayDiff,
+  buildCreateDisplayDiff,
+} from "./codePatch.service.js";
 
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 const GROQ_MODEL = "llama-3.3-70b-versatile";
@@ -19,19 +22,18 @@ export interface PerformanceReport {
     filePath: string;
     originalCode: string;
     newCode: string;
-    unifiedDiff: string; // display-only, generated locally from the two snippets above
+    unifiedDiff: string;
   } | null;
   confidence: "high" | "medium" | "low";
-  // computed metrics, echoed back so the frontend never has to re-derive them
   computed: ComputedMetrics;
 }
 
 interface ComputedMetrics {
   requestsSent: number;
   dbSpansPerRequest: number | null;
-  dbTimeSharePercent: number | null; // capped 0-100, safe to show as "% of request time"
-  dbCallsOverlap: boolean; // true if raw DB time exceeds request time — usually a sampling-window artifact, NOT evidence of concurrency
-  dbCumulativeTimeMs: number | null; // uncapped — total DB span time per request, for the "overlap" label
+  dbTimeSharePercent: number | null;
+  dbCallsOverlap: boolean;
+  dbCumulativeTimeMs: number | null;
   externalSpansPerRequest: number | null;
   externalTimeSharePercent: number | null;
   externalCallsOverlap: boolean;
@@ -40,25 +42,58 @@ interface ComputedMetrics {
   errorRatePercent: number;
 }
 
+// ---------------------------------------------------------------------------
+// Multi-file strategy types — a strategy can now touch several files, and
+// each file change can either modify existing code (snippet replace, same
+// as before) or create a brand new file (e.g. a new cache util, a new
+// middleware, a new query helper module).
+// ---------------------------------------------------------------------------
+export type FileChangeType = "modify" | "create";
+
+export interface FileChange {
+  filePath: string;
+  changeType: FileChangeType;
+  originalCode?: string; // present only for "modify"
+  newCode: string;
+  unifiedDiff: string;
+}
+
 export interface OptimizationStrategy {
   id: string; // "A" | "B" | "C"
-  title: string; // "Batch database queries"
-  approach: string; // short tag: "batching" | "caching" | "aggregation" | ...
+  title: string;
+  approach: string;
   description: string;
   estimatedImprovementPercent: { min: number; max: number };
-  diff: {
-    filePath: string;
-    originalCode: string;
-    newCode: string;
-    unifiedDiff: string;
-  };
+  changes: FileChange[];
   confidence: "high" | "medium" | "low";
 }
 
 export interface StrategyGenerationResult {
   rootCause: string;
   severity: "critical" | "warning" | "info";
-  strategies: OptimizationStrategy[]; // 2-3, never fabricated to hit a count
+  strategies: OptimizationStrategy[]; // always 3 unless Groq truly can't produce any
+}
+
+// Raw shape as returned by the model, before validation/enrichment.
+interface RawFileChange {
+  filePath?: string;
+  changeType?: string;
+  originalCode?: string;
+  newCode?: string;
+}
+interface RawStrategy {
+  id?: string;
+  title?: string;
+  approach?: string;
+  description?: string;
+  estimatedImprovementPercent?: { min?: number; max?: number };
+  changes?: RawFileChange[];
+  confidence?: string;
+}
+interface RawStrategiesResponse {
+  rootCause?: string;
+  severity?: string;
+  strategies?: RawStrategy[];
 }
 
 function computeMetrics(
@@ -85,13 +120,6 @@ function computeMetrics(
       dbCumulativeTimeMs = dbTimePerRequestRaw;
       const rawPercent = avgMs > 0 ? (dbTimePerRequestRaw / avgMs) * 100 : null;
       if (rawPercent !== null && rawPercent > 100) {
-        // Cumulative span time exceeding request time is most often a
-        // sampling-window mismatch (telemetry pulled from a window that
-        // doesn't line up exactly with the completed run), NOT proof
-        // that DB calls ran concurrently. Cap it and flag it so the
-        // prompt never asserts concurrency the code doesn't actually
-        // have — sequential `await`s in a loop are still sequential
-        // even if this ratio looks off.
         dbCallsOverlap = true;
         dbTimeSharePercent = 100;
       } else {
@@ -141,16 +169,9 @@ function computeMetrics(
 
 interface StructuralFinding {
   found: boolean;
-  detail?: string; // human-readable description of what was matched, for the prompt
+  detail?: string;
 }
 
-// Statistics (spans/request, cumulative time) are noisy at low request
-// counts and can't reliably distinguish "sequential loop calling the DB
-// per item" from "two unrelated queries" or "concurrent calls". The code
-// itself can, structurally: a for/for-of/forEach/map with an `await` in
-// its body that calls something DB-shaped. This is checked BEFORE the
-// LLM ever sees the code, so the model is told what's structurally true
-// rather than asked to eyeball it from a stats summary.
 const DB_CALL_HINT = /\b(find(One|ById)?|aggregate|query|exec)\s*\(/i;
 const LOOP_PATTERNS = [
   /for\s*\(\s*const\s+\w+\s+of\s+[^)]+\)\s*{([^}]*)}/gs,
@@ -173,19 +194,66 @@ function detectLoopedDbCall(codeContext: string): StructuralFinding {
   return { found: false };
 }
 
-// The model is not allowed to freely guess an improvement number — that's
-// how you get "60-80% faster" promised against a benchmark that only
-// moves 8%. Instead we compute the theoretical ceiling ourselves: you
-// cannot improve a request by more than the share of its time you're
-// actually eliminating. This gets passed to the model as a hard
-// instruction and is also enforced again after parsing (see
-// clampImprovementEstimate).
+
+const NODE_BUILTINS = new Set([
+  "assert",
+  "buffer",
+  "child_process",
+  "cluster",
+  "crypto",
+  "dns",
+  "events",
+  "fs",
+  "http",
+  "https",
+  "net",
+  "os",
+  "path",
+  "querystring",
+  "readline",
+  "stream",
+  "string_decoder",
+  "timers",
+  "tls",
+  "url",
+  "util",
+  "zlib",
+  "worker_threads",
+  "perf_hooks",
+  "async_hooks",
+]);
+
+// Pulls bare package specifiers out of ESM/CJS import statements — used to
+// verify a strategy never imports something that isn't actually installed
+// in this repo. Relative imports and Node builtins are ignored.
+function extractImportedPackages(code: string): string[] {
+  const specifiers = new Set<string>();
+  const patterns = [
+    /import\s+(?:[\s\S]*?\s+from\s+)?["']([^"']+)["']/g,
+    /require\(\s*["']([^"']+)["']\s*\)/g,
+  ];
+  for (const pattern of patterns) {
+    let match: RegExpExecArray | null;
+    pattern.lastIndex = 0;
+    while ((match = pattern.exec(code)) !== null) {
+      const spec = match[1];
+      if (!spec || spec.startsWith(".") || spec.startsWith("/")) continue;
+      const bare = spec.replace(/^node:/, "");
+      if (NODE_BUILTINS.has(bare)) continue;
+      // scoped (@scope/pkg) or plain (pkg/subpath) — keep only the package name
+      const pkgName = bare.startsWith("@")
+        ? bare.split("/").slice(0, 2).join("/")
+        : bare.split("/")[0];
+      specifiers.add(pkgName);
+    }
+  }
+  return [...specifiers];
+}
+
 function estimateCeiling(
   metrics: ComputedMetrics,
   structural: StructuralFinding,
 ): number {
-  // If the overlap flag fired, the underlying % is unreliable (sampling-
-  // window mismatch) — don't let it inflate the ceiling on its own.
   const dbShare = metrics.dbCallsOverlap
     ? 50
     : (metrics.dbTimeSharePercent ?? 0);
@@ -193,13 +261,8 @@ function estimateCeiling(
     ? 50
     : (metrics.externalTimeSharePercent ?? 0);
   const dominantShare = Math.max(dbShare, externalShare);
-
-  // At low spans-per-request (< 5), even a real structural fix removes
-  // relatively few round-trips, so cap more conservatively than a
-  // textbook N+1 case regardless of what the % share suggests.
   const lowVolumeFix = (metrics.dbSpansPerRequest ?? 0) < 5;
   const scale = lowVolumeFix ? 0.6 : 0.9;
-
   return Math.max(5, Math.round(dominantShare * scale));
 }
 
@@ -214,11 +277,6 @@ function clampImprovementEstimate(
   return { min: Math.max(1, min), max: Math.max(min + 1, max) };
 }
 
-// Counts non-overlapping occurrences of `needle` in `haystack`. Used to
-// verify a strategy's `originalCode` snippet is unique before we ever
-// try to apply it — an ambiguous snippet should be caught and discarded
-// HERE, at generation time, not discovered 2 minutes into an arena run
-// after the sandbox/container/benchmark cost has already been paid.
 function countOccurrences(haystack: string, needle: string): number {
   if (!needle) return 0;
   let count = 0;
@@ -230,6 +288,17 @@ function countOccurrences(haystack: string, needle: string): number {
   return count;
 }
 
+function cleanJson(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^```(?:json)?\n?/, "")
+    .replace(/```$/, "")
+    .trim();
+}
+
+// ---------------------------------------------------------------------------
+// analyzeLoadTestPerformance — single-fix flow, unchanged (still one file).
+// ---------------------------------------------------------------------------
 function buildPrompt(
   metadata: { method: string; routePath: string },
   metrics: ComputedMetrics,
@@ -239,19 +308,15 @@ function buildPrompt(
   return `You are a senior performance engineer reviewing a load test. Respond with ONLY raw JSON matching this exact TypeScript shape — no markdown fences, no prose outside the JSON:
 
 {
-  "rootCause": string,          // one sentence, specific, e.g. "N+1 query pattern in the order controller"
+  "rootCause": string,
   "severity": "critical" | "warning" | "info",
-  "evidence": string[],         // 2-4 short bullet strings, MUST use the exact numbers given below verbatim, never invent new numbers
+  "evidence": string[],
   "suggestedFix": {
-    "title": string,            // e.g. "Batch product lookups with a single query"
-    "description": string,      // 2-4 sentences, concrete, referencing the actual code below
+    "title": string,
+    "description": string,
     "estimatedImprovementPercent": { "min": number, "max": number }
   },
   "diff": { "filePath": string, "originalCode": string, "newCode": string } | null,
-  // "originalCode" MUST be copied EXACTLY, character-for-character (including indentation/whitespace),
-  // from the source code shown below — a short contiguous snippet (a few lines to ~1 function), not the
-  // whole file, and not paraphrased or reformatted in any way. "newCode" is your replacement for that
-  // exact snippet. null only if no code-level fix applies (e.g. the bottleneck is external/network, not this codebase).
   "confidence": "high" | "medium" | "low"
 }
 
@@ -265,49 +330,33 @@ MEASURED METRICS (ground truth — do not contradict or recompute these, just ci
 - DB spans per request: ${metrics.dbSpansPerRequest ?? "not available"}
 - ${
     metrics.dbCallsOverlap
-      ? `Cumulative DB span time per request: ~${metrics.dbCumulativeTimeMs}ms (this figure exceeds avg request latency — this is a telemetry sampling-window artifact, NOT evidence that DB calls ran concurrently. Do not describe this as "% of request time" and do NOT call the DB calls "concurrent" based on this number alone.)`
+      ? `Cumulative DB span time per request: ~${metrics.dbCumulativeTimeMs}ms (telemetry sampling-window artifact, NOT evidence of concurrent DB calls).`
       : `% of request time in DB calls: ${metrics.dbTimeSharePercent !== null ? `${metrics.dbTimeSharePercent}%` : "not available"}`
   }
 - External/API calls per request: ${metrics.externalSpansPerRequest ?? "not available"}
 - % of request time in external calls: ${metrics.externalTimeSharePercent !== null ? `${metrics.externalTimeSharePercent}%` : "not available"}
-- MAX DEFENSIBLE IMPROVEMENT ESTIMATE: your estimatedImprovementPercent.max MUST NOT exceed ${estimateCeiling(metrics, structural)}%. This ceiling is computed from the actual measured DB/external time share and the scale of the pattern found — it is not a suggestion, it is a hard cap.
+- MAX DEFENSIBLE IMPROVEMENT ESTIMATE: your estimatedImprovementPercent.max MUST NOT exceed ${estimateCeiling(metrics, structural)}%.
 
-STRUCTURAL CODE EVIDENCE (verified mechanically by scanning the code below, not a guess):
+STRUCTURAL CODE EVIDENCE:
 ${
   structural.found
-    ? `A loop was found that calls an async DB-shaped function inside its body: "${structural.detail}..." — this IS real, verified evidence of a sequential-per-item query pattern. You should treat this as your PRIMARY evidence for the root cause, independent of (and more reliable than) the DB span-count/time statistics above.`
-    : `No loop calling a DB function per iteration was detected in the code shown. Do NOT claim a "loop", "N+1", or "sequential per-item queries" pattern exists unless you can point to an actual loop in the code below. If you can't find one, describe whatever the real pattern actually is instead (e.g. "two independent queries with no batching opportunity", "a query missing an index", "an oversized response payload").`
+    ? `A loop was found calling an async DB-shaped function inside its body: "${structural.detail}..." — treat this as primary evidence.`
+    : `No loop calling a DB function per iteration was detected. Do NOT claim a "loop"/"N+1" pattern unless you can point to an actual loop in the code below.`
 }
 
-REAL SOURCE CODE (route -> controller -> service). Base your root cause and diff on THIS code, not a generic guess:
+REAL SOURCE CODE (route -> controller -> service):
 ${codeContext.slice(0, MAX_CODE_CONTEXT_CHARS)}
 
 Rules:
-1. A "sequential per-item query loop" or "N+1" root cause is ONLY justified by the STRUCTURAL CODE EVIDENCE section above — never by DB-spans-per-request alone, which is noisy at low request counts and proves nothing on its own. If structural evidence found a loop, cite it as your primary evidence and the root cause. If structural evidence found nothing, do NOT claim a loop, N+1, or "sequential queries in a loop" exists — describe the actual pattern in the code instead. Evidence bullets must never contain a root-cause label that contradicts the structural finding.
-2. NEVER use the word "concurrent" to describe DB calls unless the code explicitly uses Promise.all, Promise.allSettled, or otherwise fires multiple queries without awaiting each one individually before starting the next. Sequential await calls inside a loop (the classic N+1 shape) are SEQUENTIAL, not concurrent — describing them as concurrent directly contradicts the code and is never acceptable. If the cumulative DB span time appears to exceed average request latency, do not editorialize about why — just note the two figures side by side without asserting concurrency as an explanation.
-3. Statistical evidence (spans/request, cumulative time, % share) should be presented as supporting context for scale/impact, not as the primary justification that a pattern exists — that's what the structural evidence section is for.
-4. If DB spans-per-request is close to 1 but latency is still high, look for missing indexes, oversized payloads, or unbounded queries (no .limit()) in the code instead — don't call it N+1 if it isn't.
-5. If external-call time share dominates, the fix is about caching/parallelizing/timeout tuning on that call, not the database.
-6. Evidence bullets must each cite a real number from above or the structural finding. Do not fabricate span counts, percentages, or line references not present in the code.
-7. "originalCode" must be an exact, verbatim substring of the source shown above — copy-paste it, do not retype or reformat it, or the patch cannot be located and applied. Keep it as short as possible while still being UNIQUE in the file — if the same lines appear more than once anywhere in the source shown, expand the snippet (add a line above/below) until it is unique, or the patch will be rejected.
-8. estimatedImprovementPercent must stay within the MAX DEFENSIBLE IMPROVEMENT ESTIMATE given above — do not invent a larger number no matter how convincing the fix seems.
-9. If a per-operation DB breakdown is available above, prefer citing the SPECIFIC named operation and its own call count/duration in your evidence (e.g. "Product.find() was called 74 times, averaging 2.1ms each, totaling 155ms") over the generic blended DB average — this is far stronger, more credible evidence than an aggregate number.
+1. A "sequential per-item query loop"/"N+1" root cause is ONLY justified by the STRUCTURAL CODE EVIDENCE above.
+2. NEVER call DB calls "concurrent" unless the code explicitly uses Promise.all/allSettled.
+3. Statistical evidence supports scale/impact, not existence of a pattern.
+4. If DB spans/request is close to 1, look for missing indexes/oversized payloads/unbounded queries instead.
+5. If external-call time dominates, the fix is caching/parallelizing/timeout tuning on that call.
+6. Evidence bullets must each cite a real number above or the structural finding.
+7. "originalCode" must be an exact, verbatim, UNIQUE substring of the source shown above.
+8. estimatedImprovementPercent must stay within the MAX DEFENSIBLE IMPROVEMENT ESTIMATE.
 `;
-}
-
-function formatDbBreakdown(
-  breakdown: DbOperationBreakdown[] | undefined,
-): string {
-  if (!breakdown || breakdown.length === 0) {
-    return "Not available — no per-operation breakdown could be retrieved for this run.";
-  }
-  return breakdown
-    .slice(0, 5)
-    .map(
-      (b) =>
-        `- ${b.operation}: called ${b.callCount} times, avg ${b.avgDurationMs}ms, total ${b.totalDurationMs}ms`,
-    )
-    .join("\n");
 }
 
 export async function analyzeLoadTestPerformance(opts: {
@@ -316,6 +365,7 @@ export async function analyzeLoadTestPerformance(opts: {
   telemetry: RouteTelemetry | null;
   codeContext: string;
   dbBreakdown?: DbOperationBreakdown[];
+  knownFilePaths?: string[];
 }): Promise<PerformanceReport> {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) throw new Error("GROQ_API_KEY is not configured on the server.");
@@ -335,7 +385,7 @@ export async function analyzeLoadTestPerformance(opts: {
         {
           role: "system",
           content:
-            "You are a senior performance engineer. You only cite numbers you were given, never invent metrics, never call sequential await calls 'concurrent', never assert a loop/N+1 pattern exists unless the structural evidence you were given confirms it, and every diff you produce is a real, minimal patch against the exact code shown to you. Respond with raw JSON only, no markdown fences.",
+            "You are a senior performance engineer. You only cite numbers you were given, never invent metrics, never call sequential await calls 'concurrent', never assert a loop/N+1 pattern exists unless the structural evidence confirms it, and every diff you produce is a real, minimal patch against the exact code shown. Respond with raw JSON only.",
         },
         {
           role: "user",
@@ -366,12 +416,7 @@ export async function analyzeLoadTestPerformance(opts: {
 
   let parsed: Omit<PerformanceReport, "computed">;
   try {
-    const cleaned = raw
-      .trim()
-      .replace(/^```(?:json)?\n?/, "")
-      .replace(/```$/, "")
-      .trim();
-    parsed = JSON.parse(cleaned);
+    parsed = JSON.parse(cleanJson(raw));
   } catch {
     throw new Error("Failed to parse AI analysis as JSON");
   }
@@ -386,10 +431,6 @@ export async function analyzeLoadTestPerformance(opts: {
     diff = { ...diff, unifiedDiff };
   }
 
-  // Enforce the ceiling server-side too — never trust the model to have
-  // actually respected the instruction, since it's exactly this kind of
-  // unenforced "be reasonable" ask that produced 60-80% against an 8%
-  // real result before.
   const suggestedFix = {
     ...parsed.suggestedFix,
     estimatedImprovementPercent: clampImprovementEstimate(
@@ -402,53 +443,116 @@ export async function analyzeLoadTestPerformance(opts: {
   return { ...parsed, diff, suggestedFix, computed };
 }
 
+// ---------------------------------------------------------------------------
+// generateOptimizationStrategies — the arena flow. Multi-file, always 3.
+// ---------------------------------------------------------------------------
+
+const TARGET_STRATEGY_COUNT = 3;
+const MAX_GENERATION_ATTEMPTS = 3;
+
 function buildStrategiesPrompt(
   metadata: { method: string; routePath: string },
   metrics: ComputedMetrics,
   codeContext: string,
   structural: StructuralFinding,
+  knownFilePaths: string[],
+  knownDependencies: string[],
+  knownEnvVars: string[],
+  feedback: {
+    count: number;
+    alreadyAccepted: { title: string; approach: string }[];
+    rejectedNotes: string[];
+  },
 ): string {
-  return `You are a senior performance engineer. Propose 2-3 GENUINELY DIFFERENT ways to fix the
-performance problem below — different mechanisms, not variations of the same patch (e.g. don't
-propose "batch with Promise.all" and "batch with a for-loop" as two strategies — that's one strategy).
+  const alreadyAcceptedBlock =
+    /* unchanged from before */
+    feedback.alreadyAccepted.length > 0
+      ? `\nSTRATEGIES ALREADY ACCEPTED (do NOT repeat these mechanisms or near-identical patches):\n${feedback.alreadyAccepted
+          .map((s) => `- ${s.title} (${s.approach})`)
+          .join("\n")}\n`
+      : "";
 
-Valid mechanism categories to choose from (pick only ones that plausibly apply to this code):
+  const rejectedBlock =
+    feedback.rejectedNotes.length > 0
+      ? `\nPREVIOUS ATTEMPT REJECTIONS (fix these mistakes this time):\n${feedback.rejectedNotes
+          .slice(-6)
+          .map((n) => `- ${n}`)
+          .join("\n")}\n`
+      : "";
+
+  return `You are a senior performance engineer. Propose exactly ${feedback.count} GENUINELY DIFFERENT way(s) to fix the
+performance problem below — different mechanisms, not variations of the same patch.
+
+Valid mechanism categories (pick only ones that plausibly apply):
 - batching: collapse N sequential queries into one query (e.g. $in, batched find)
-- caching: introduce a cache layer (Redis/in-memory) for repeated reads
+- caching: introduce a cache layer for repeated reads — often needs a NEW file (see CACHING RULE below)
 - aggregation: push computation into the database via an aggregation/pipeline instead of app-side loops
 - indexing: add/change an index to remove a full collection scan (only if a scan is evident)
 - pagination-or-limit: bound an unbounded query
-- parallelization: convert independent sequential awaits into Promise.all (ONLY if the calls are truly independent of each other's results — never propose this for a loop where each iteration's query depends on nothing from prior iterations, i.e. only when it's safe)
+- parallelization: convert independent sequential awaits into Promise.all (ONLY if calls are truly independent)
+- extraction: pull repeated/inline logic into a NEW helper/service module to make a fix like batching or caching cleaner
 
+A strategy can touch MULTIPLE files. Each file change is either:
+- "modify": edit an existing file. "originalCode" MUST be an exact, verbatim, UNIQUE substring of the source
+  shown below for that file (expand it with more surrounding lines if it isn't unique).
+- "create": add a brand new file that does not exist yet. Do NOT set "originalCode" for a create. The filePath
+  MUST NOT be one of the existing known files listed below.
+
+KNOWN EXISTING FILES (only these can be targeted with "modify"):
+${knownFilePaths.map((f) => `- ${f}`).join("\n")}
+
+ALREADY-INSTALLED NPM DEPENDENCIES (this is the COMPLETE list — nothing else is installed):
+${knownDependencies.length > 0 ? knownDependencies.map((d) => `- ${d}`).join("\n") : "(none detected)"}
+
+ALREADY-CONFIGURED ENV VARS (available at runtime):
+${knownEnvVars.length > 0 ? knownEnvVars.map((e) => `- ${e}`).join("\n") : "(none)"}
+
+HARD RULE — NO NEW DEPENDENCIES: any "import"/"require" in a "create" or "modify" file MUST resolve to either
+a Node.js builtin (fs, path, crypto, etc.) or a package literally present in the ALREADY-INSTALLED list above.
+You cannot add a package to package.json — nothing gets installed beyond what's already there. A strategy that
+imports an uninstalled package will be discarded outright.
+
+CACHING RULE: default to an in-memory cache (a simple Map or object with a TTL check on read, no dependency
+needed) UNLESS a Redis-family package (redis, ioredis) is ALREADY in the installed-dependencies list above AND
+a Redis-shaped connection env var (e.g. REDIS_URL, REDIS_HOST) is ALREADY in the configured-env-vars list above.
+Only in that case may you propose a real Redis-backed cache — and if you do:
+  - Read connection info from process.env (e.g. process.env.REDIS_URL), never hardcode host/port.
+  - Use the correct current node-redis v4+ API: \`import { createClient } from "redis"; const client = createClient({ url: process.env.REDIS_URL }); await client.connect();\` — never \`new RedisClient()\`, that class does not exist.
+  - Always set a TTL on writes (e.g. \`client.set(key, value, { EX: 60 })\`), never an unbounded cache.
+${alreadyAcceptedBlock}${rejectedBlock}
 Respond with ONLY raw JSON, no markdown fences:
 {
   "rootCause": string,
   "severity": "critical" | "warning" | "info",
   "strategies": [
     {
-      "id": "A",
+      "id": string,
       "title": string,
       "approach": one of the category slugs above,
-      "description": string, // 2-3 sentences, concrete, referencing the actual code
+      "description": string,
       "estimatedImprovementPercent": { "min": number, "max": number },
-      "diff": { "filePath": string, "originalCode": string, "newCode": string },
+      "changes": [
+        {
+          "filePath": string,
+          "changeType": "modify" | "create",
+          "originalCode": string,
+          "newCode": string
+        }
+      ],
       "confidence": "high" | "medium" | "low"
     }
   ]
 }
 
 Rules:
-1. Every "originalCode" must be an exact verbatim substring of the source shown below, AND it must
-   be UNIQUE — if the same lines appear more than once anywhere in the source, expand the snippet
-   (include more surrounding lines) until it only matches one place. A snippet that matches more than
-   once cannot be safely applied and the strategy will be discarded.
-2. Only propose a mechanism that is actually applicable to this code — do not invent a caching
-   strategy if there's nowhere sensible to cache, do not invent parallelization if the queries
-   are dependent. It is fine to return only 2 strategies if a 3rd would be contrived.
-3. Each strategy's estimatedImprovementPercent.max MUST NOT exceed ${estimateCeiling(metrics, structural)}%.
-4. Follow the same evidentiary rules as before: never call sequential awaits "concurrent", never
-   claim a loop/N+1 exists unless structural evidence confirms it.
-5. Strategies must be meaningfully different diffs — not the same patch reworded.
+1. Every strategy must have at least one entry in "changes".
+2. Every "modify" originalCode must be an exact verbatim, UNIQUE substring of the source shown below.
+3. Every "create" filePath must be new and not reused across strategies you propose in this response.
+4. Only propose a mechanism that is actually applicable to this code.
+5. Each strategy's estimatedImprovementPercent.max MUST NOT exceed ${estimateCeiling(metrics, structural)}%.
+6. Never call sequential awaits "concurrent". Never claim a loop/N+1 exists unless structural evidence confirms it.
+7. Strategies must be meaningfully different — not the same patch reworded, and not a repeat of an already-accepted strategy above.
+8. Obey the HARD RULE and CACHING RULE above exactly — a violation gets the whole strategy discarded.
 
 ${
   structural.found
@@ -468,44 +572,180 @@ ${codeContext.slice(0, MAX_CODE_CONTEXT_CHARS)}
 `;
 }
 
-// Two diffs count as "the same strategy" if they touch the same file and their
-// newCode bodies are near-identical after whitespace normalization. Cheap guard
-// against the LLM padding out to 3 by rewording one fix.
-function dedupeStrategies(
-  strategies: OptimizationStrategy[],
-): OptimizationStrategy[] {
-  const seen: string[] = [];
-  const out: OptimizationStrategy[] = [];
-  for (const s of strategies) {
-    const norm = `${s.diff.filePath}::${s.diff.newCode.replace(/\s+/g, " ").trim()}`;
-    const isDup = seen.some((prev) => {
-      const a = new Set(norm.split(" "));
-      const b = new Set(prev.split(" "));
-      const overlap = [...a].filter((w) => b.has(w)).length;
-      return overlap / Math.max(a.size, b.size) > 0.85; // near-identical token overlap
-    });
-    if (!isDup) {
-      seen.push(norm);
-      out.push(s);
-    }
-  }
-  return out;
+
+function normalizeChangesKey(changes: FileChange[]): string {
+  return changes
+    .map((c) => `${c.filePath}::${c.newCode.replace(/\s+/g, " ").trim()}`)
+    .sort()
+    .join("||");
 }
 
-export async function generateOptimizationStrategies(opts: {
-  metadata: { method: string; routePath: string };
-  runResult: LoadScriptResult;
-  telemetry: RouteTelemetry | null;
-  codeContext: string;
-  dbBreakdown?: DbOperationBreakdown[];
-  knownFilePaths: string[];
-}): Promise<StrategyGenerationResult> {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) throw new Error("GROQ_API_KEY is not configured on the server.");
+function tokenOverlap(a: string, b: string): number {
+  const setA = new Set(a.split(" "));
+  const setB = new Set(b.split(" "));
+  const overlap = [...setA].filter((w) => setB.has(w)).length;
+  return overlap / Math.max(setA.size, setB.size, 1);
+}
 
-  const computed = computeMetrics(opts.runResult, opts.telemetry);
-  const structural = detectLoopedDbCall(opts.codeContext);
+// Two strategies count as "the same" if their combined change fingerprint
+// is near-identical after whitespace normalization — cheap guard against
+// the model padding out the count by rewording one fix.
+function isDuplicateStrategy(
+  candidate: OptimizationStrategy,
+  existing: OptimizationStrategy[],
+): boolean {
+  const norm = normalizeChangesKey(candidate.changes);
+  return existing.some(
+    (s) => tokenOverlap(norm, normalizeChangesKey(s.changes)) > 0.85,
+  );
+}
 
+// Validates one raw strategy from the model, builds real unified diffs,
+// and clamps its improvement estimate. Returns null (and pushes a reason
+// into rejectedNotes) if it can't be safely applied.
+function validateAndBuildStrategy(
+  raw: RawStrategy,
+  opts: {
+    codeContext: string;
+    knownFilePaths: string[];
+    knownDependencies: string[];
+  },
+  computed: ComputedMetrics,
+  structural: StructuralFinding,
+  usedFilePathsThisBatch: Set<string>,
+  rejectedNotes: string[],
+): OptimizationStrategy | null {
+  const label = raw.title || raw.id || "untitled strategy";
+
+  if (
+    !raw.title ||
+    !raw.approach ||
+    !raw.description ||
+    !raw.changes ||
+    raw.changes.length === 0
+  ) {
+    rejectedNotes.push(
+      `"${label}" was missing required fields or had no file changes.`,
+    );
+    return null;
+  }
+  if (!raw.estimatedImprovementPercent) {
+    rejectedNotes.push(`"${label}" was missing an improvement estimate.`);
+    return null;
+  }
+
+  const builtChanges: FileChange[] = [];
+  const seenPathsInStrategy = new Set<string>();
+
+  for (const rc of raw.changes) {
+    if (!rc.filePath || !rc.newCode) {
+      rejectedNotes.push(
+        `"${label}" had a file change missing filePath/newCode.`,
+      );
+      return null;
+    }
+    if (seenPathsInStrategy.has(rc.filePath)) {
+      rejectedNotes.push(
+        `"${label}" targeted "${rc.filePath}" more than once in the same strategy.`,
+      );
+      return null;
+    }
+    seenPathsInStrategy.add(rc.filePath);
+
+    // Reject any change that imports a package we don't actually have
+    // installed — this is what catches the "new RedisClient() from a repo
+    // that never had `redis` as a dependency" failure mode before any
+    // sandbox/container cost is spent on it.
+    const imported = extractImportedPackages(rc.newCode);
+    const missingDeps = imported.filter(
+      (pkg) => !opts.knownDependencies.includes(pkg),
+    );
+    if (missingDeps.length > 0) {
+      rejectedNotes.push(
+        `"${label}" imported package(s) not installed in this repo: ${missingDeps.join(", ")}. Use an in-memory approach or a package that's actually a dependency.`,
+      );
+      return null;
+    }
+
+    const changeType: FileChangeType =
+      rc.changeType === "create" ? "create" : "modify";
+
+    if (changeType === "modify") {
+      if (!opts.knownFilePaths.includes(rc.filePath)) {
+        rejectedNotes.push(
+          `"${label}" tried to modify "${rc.filePath}", which isn't a known file in this repo's resolved context.`,
+        );
+        return null;
+      }
+      if (!rc.originalCode) {
+        rejectedNotes.push(
+          `"${label}" had a "modify" change for "${rc.filePath}" with no originalCode.`,
+        );
+        return null;
+      }
+      const occurrences = countOccurrences(opts.codeContext, rc.originalCode);
+      if (occurrences !== 1) {
+        rejectedNotes.push(
+          `"${label}"'s originalCode for "${rc.filePath}" matched ${occurrences} place(s) instead of exactly 1.`,
+        );
+        return null;
+      }
+      builtChanges.push({
+        filePath: rc.filePath,
+        changeType: "modify",
+        originalCode: rc.originalCode,
+        newCode: rc.newCode,
+        unifiedDiff: buildDisplayDiff(rc.filePath, rc.originalCode, rc.newCode),
+      });
+    } else {
+      if (opts.knownFilePaths.includes(rc.filePath)) {
+        rejectedNotes.push(
+          `"${label}" tried to "create" "${rc.filePath}", but that file already exists — use "modify" instead.`,
+        );
+        return null;
+      }
+      if (usedFilePathsThisBatch.has(rc.filePath)) {
+        rejectedNotes.push(
+          `"${label}" tried to create "${rc.filePath}" but another accepted strategy already claims that path.`,
+        );
+        return null;
+      }
+      builtChanges.push({
+        filePath: rc.filePath,
+        changeType: "create",
+        newCode: rc.newCode,
+        unifiedDiff: buildCreateDisplayDiff(rc.filePath, rc.newCode),
+      });
+    }
+  }
+
+  const confidence: "high" | "medium" | "low" =
+    raw.confidence === "high" || raw.confidence === "low"
+      ? raw.confidence
+      : "medium";
+
+  return {
+    id: raw.id || `S${Math.random().toString(36).slice(2, 6)}`,
+    title: raw.title,
+    approach: raw.approach,
+    description: raw.description,
+    estimatedImprovementPercent: clampImprovementEstimate(
+      {
+        min: raw.estimatedImprovementPercent.min ?? 5,
+        max: raw.estimatedImprovementPercent.max ?? 10,
+      },
+      computed,
+      structural,
+    ),
+    changes: builtChanges,
+    confidence,
+  };
+}
+
+async function callGroqForStrategies(
+  prompt: string,
+  apiKey: string,
+): Promise<RawStrategiesResponse | null> {
   const response = await fetch(GROQ_API_URL, {
     method: "POST",
     headers: {
@@ -518,97 +758,126 @@ export async function generateOptimizationStrategies(opts: {
         {
           role: "system",
           content:
-            "You are a senior performance engineer proposing multiple distinct, real fixes. You never invent metrics, never mislabel sequential code as concurrent, and every diff is a real minimal patch against the exact code shown — unique within it. Respond with raw JSON only.",
+            "You are a senior performance engineer proposing multiple distinct, real fixes across one or more files, including new files when genuinely useful. You never invent metrics, never mislabel sequential code as concurrent, and every change is a real, minimal, applicable patch against the exact code shown — unique within it. Respond with raw JSON only.",
         },
-        {
-          role: "user",
-          content: buildStrategiesPrompt(
-            opts.metadata,
-            computed,
-            opts.codeContext,
-            structural,
-          ),
-        },
+        { role: "user", content: prompt },
       ],
       temperature: 0.4,
-      max_tokens: 2500,
+      max_tokens: 3000,
       response_format: { type: "json_object" },
     }),
   });
 
-  if (!response.ok) {
-    const errBody = await response.text().catch(() => "");
-    throw new Error(
-      `Groq API error (${response.status}): ${errBody.slice(0, 200)}`,
-    );
-  }
-
+  if (!response.ok) return null;
   const data = await response.json();
   const raw: string | undefined = data.choices?.[0]?.message?.content;
-  if (!raw) throw new Error("Groq API returned no strategies");
-
-  let parsed: StrategyGenerationResult;
+  if (!raw) return null;
   try {
-    const cleaned = raw
-      .trim()
-      .replace(/^```(?:json)?\n?/, "")
-      .replace(/```$/, "")
-      .trim();
-    parsed = JSON.parse(cleaned);
+    return JSON.parse(cleanJson(raw));
   } catch {
-    throw new Error("Failed to parse strategies JSON");
+    return null;
   }
+}
 
-  const withDiffs = parsed.strategies
-    .filter((s) => {
-      const known = opts.knownFilePaths.includes(s.diff.filePath);
-      if (!known) {
-        console.warn(
-          `Discarding strategy ${s.id}: filePath "${s.diff.filePath}" wasn't in the resolved code context`,
-        );
-        return false;
-      }
-      // Catch ambiguous snippets HERE — before any sandbox/container/
-      // benchmark cost is spent on a strategy that codePatch.service.ts
-      // will end up refusing to apply anyway.
-      const occurrences = countOccurrences(
-        opts.codeContext,
-        s.diff.originalCode,
-      );
-      if (occurrences !== 1) {
-        console.warn(
-          `Discarding strategy ${s.id}: originalCode matches ${occurrences} place(s) in the resolved code — must be exactly 1 to apply safely.`,
-        );
-        return false;
-      }
-      return true;
-    })
-    .map((s) => ({
-      ...s,
-      estimatedImprovementPercent: clampImprovementEstimate(
-        s.estimatedImprovementPercent,
-        computed,
-        structural,
-      ),
-      diff: {
-        ...s.diff,
-        unifiedDiff: buildDisplayDiff(
-          s.diff.filePath,
-          s.diff.originalCode,
-          s.diff.newCode,
-        ),
+export async function generateOptimizationStrategies(opts: {
+  metadata: { method: string; routePath: string };
+  runResult: LoadScriptResult;
+  telemetry: RouteTelemetry | null;
+  codeContext: string;
+  dbBreakdown?: DbOperationBreakdown[];
+  knownFilePaths: string[];
+  knownDependencies: string[];
+  knownEnvVars: string[];
+}): Promise<StrategyGenerationResult> {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error("GROQ_API_KEY is not configured on the server.");
+
+  const computed = computeMetrics(opts.runResult, opts.telemetry);
+  const structural = detectLoopedDbCall(opts.codeContext);
+
+  let rootCause = "";
+  let severity: "critical" | "warning" | "info" = "warning";
+  const accepted: OptimizationStrategy[] = [];
+  const rejectedNotes: string[] = [];
+  const usedFilePaths = new Set<string>();
+
+  for (
+    let attempt = 0;
+    attempt < MAX_GENERATION_ATTEMPTS &&
+    accepted.length < TARGET_STRATEGY_COUNT;
+    attempt++
+  ) {
+    const needed = TARGET_STRATEGY_COUNT - accepted.length;
+    const prompt = buildStrategiesPrompt(
+      opts.metadata,
+      computed,
+      opts.codeContext,
+      structural,
+      opts.knownFilePaths,
+      opts.knownDependencies,
+      opts.knownEnvVars,
+      {
+        count: needed,
+        alreadyAccepted: accepted.map((s) => ({
+          title: s.title,
+          approach: s.approach,
+        })),
+        rejectedNotes,
       },
-    }));
-
-  const deduped = dedupeStrategies(withDiffs);
-  if (deduped.length === 0)
-    throw new Error(
-      "The model didn't produce any strategies with a unique, safely-applicable code change. Try generating again.",
     );
 
-  return {
-    rootCause: parsed.rootCause,
-    severity: parsed.severity,
-    strategies: deduped,
-  };
+    const parsed = await callGroqForStrategies(prompt, apiKey);
+    if (!parsed) {
+      rejectedNotes.push(
+        `Attempt ${attempt + 1}: Groq call failed or returned unparseable JSON.`,
+      );
+      continue;
+    }
+
+    if (attempt === 0) {
+      rootCause = parsed.rootCause ?? "";
+      severity =
+        parsed.severity === "critical" || parsed.severity === "info"
+          ? parsed.severity
+          : "warning";
+    }
+
+    for (const rawStrategy of parsed.strategies ?? []) {
+      if (accepted.length >= TARGET_STRATEGY_COUNT) break;
+      const built = validateAndBuildStrategy(
+        rawStrategy,
+        {
+          codeContext: opts.codeContext,
+          knownFilePaths: opts.knownFilePaths,
+          knownDependencies: opts.knownDependencies,
+        },
+        computed,
+        structural,
+        usedFilePaths,
+        rejectedNotes,
+      );
+      if (!built) continue;
+      if (isDuplicateStrategy(built, accepted)) {
+        rejectedNotes.push(
+          `"${built.title}" was too similar to an already-accepted strategy.`,
+        );
+        continue;
+      }
+      accepted.push(built);
+      for (const c of built.changes) usedFilePaths.add(c.filePath);
+    }
+  }
+
+  if (accepted.length === 0) {
+    throw new Error(
+      "The model didn't produce any strategies with a safely-applicable code change after multiple attempts. Try again.",
+    );
+  }
+
+  const relabeled = accepted.slice(0, TARGET_STRATEGY_COUNT).map((s, i) => ({
+    ...s,
+    id: String.fromCharCode(65 + i),
+  }));
+
+  return { rootCause, severity, strategies: relabeled };
 }

@@ -137,18 +137,23 @@ export interface DbOperationBreakdown {
   totalDurationMs: number;
 }
 
+export type FileChangeType = "modify" | "create";
+
+export interface FileChange {
+  filePath: string;
+  changeType: FileChangeType;
+  originalCode?: string;
+  newCode: string;
+  unifiedDiff: string;
+}
+
 export interface OptimizationStrategy {
   id: string;
   title: string;
   approach: string;
   description: string;
   estimatedImprovementPercent: { min: number; max: number };
-  diff: {
-    filePath: string;
-    originalCode: string;
-    newCode: string;
-    unifiedDiff: string;
-  };
+  changes: FileChange[];
   confidence: "high" | "medium" | "low";
 }
 
@@ -224,6 +229,30 @@ export interface ArenaCandidateLogEvent {
   durationMs: number | null;
   responseBodySummary: string | null;
   timestamp: number;
+}
+
+
+export interface CreatePrResult {
+  prUrl: string;
+  prNumber: number;
+  branchName: string;
+}
+
+export async function createPullRequestForStrategy(
+  repositoryId: string,
+  routeIndex: number,
+  strategy: OptimizationStrategy,
+  candidateResult?: ArenaCandidateResult,
+): Promise<CreatePrResult> {
+  const { data } = await apiClient.post<CreatePrResult>(
+    `/repos/${repositoryId}/create-pr`,
+    {
+      routeIndex,
+      strategy,
+      candidateResult,
+    },
+  );
+  return data;
 }
 
 export async function generateStrategies(
