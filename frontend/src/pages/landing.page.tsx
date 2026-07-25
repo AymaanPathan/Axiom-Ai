@@ -40,9 +40,7 @@ import {
   ERROR,
 } from "../theme";
 
-
 const NAV_LINKS = ["Product", "How it works", "Benchmarks", "Docs"];
-
 
 const ADD_BG = "#0f2415";
 const ADD_FG = "#7ee2a8";
@@ -122,23 +120,11 @@ function CodeWindowChrome({
     >
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-1.5">
-          <span
-            className="h-2.5 w-2.5 rounded-full"
-            style={{ background: "#3a3a35" }}
-          />
-          <span
-            className="h-2.5 w-2.5 rounded-full"
-            style={{ background: "#3a3a35" }}
-          />
-          <span
-            className="h-2.5 w-2.5 rounded-full"
-            style={{ background: "#3a3a35" }}
-          />
+          <span className="h-2.5 w-2.5 rounded-full" style={{ background: "#3a3a35" }} />
+          <span className="h-2.5 w-2.5 rounded-full" style={{ background: "#3a3a35" }} />
+          <span className="h-2.5 w-2.5 rounded-full" style={{ background: "#3a3a35" }} />
         </div>
-        <span
-          className="text-[12.5px]"
-          style={{ fontFamily: DIFF_MONO, color: "#9a9a92" }}
-        >
+        <span className="text-[12.5px]" style={{ fontFamily: DIFF_MONO, color: "#9a9a92" }}>
           {fileName}
         </span>
       </div>
@@ -208,18 +194,11 @@ function DiffViewer({
           return (
             <div key={i} style={{ background: bg, display: "flex" }}>
               {showGutter && (
-                <span
-                  className="flex shrink-0 select-none"
-                  style={{ fontSize: 11.5, color: GUTTER_FG }}
-                >
-                  <span
-                    style={{ width: 32, textAlign: "right", paddingRight: 8 }}
-                  >
+                <span className="flex shrink-0 select-none" style={{ fontSize: 11.5, color: GUTTER_FG }}>
+                  <span style={{ width: 32, textAlign: "right", paddingRight: 8 }}>
                     {row.oldLine ?? ""}
                   </span>
-                  <span
-                    style={{ width: 32, textAlign: "right", paddingRight: 12 }}
-                  >
+                  <span style={{ width: 32, textAlign: "right", paddingRight: 12 }}>
                     {row.newLine ?? ""}
                   </span>
                 </span>
@@ -268,7 +247,6 @@ const WINNING_DIFF = `--- a/src/routes/orders.ts
 +  ]);
 `;
 
-
 const DEMO_SCRIPT = `import http from "k6/http";
 import { check, sleep } from "k6";
 
@@ -306,16 +284,10 @@ function ScriptDemo() {
 
   return (
     <div className="grid grid-cols-1 gap-5 lg:grid-cols-2 lg:items-start">
-      <div
-        className="rounded-2xl border p-6"
-        style={{ borderColor: BORDER, background: SURFACE }}
-      >
+      <div className="rounded-2xl border p-6" style={{ borderColor: BORDER, background: SURFACE }}>
         <div className="mb-3 flex items-center gap-2">
           <Sparkles size={15} style={{ color: ACCENT_TEXT }} />
-          <span
-            className="text-[13px] font-semibold"
-            style={{ color: TEXT_PRIMARY }}
-          >
+          <span className="text-[13px] font-semibold" style={{ color: TEXT_PRIMARY }}>
             Describe a load-test scenario
           </span>
         </div>
@@ -325,11 +297,7 @@ function ScriptDemo() {
           spellCheck={false}
           rows={3}
           className="w-full resize-none rounded-lg border bg-transparent p-3 text-[14px] leading-[1.55] outline-none"
-          style={{
-            borderColor: BORDER_STRONG,
-            color: TEXT_PRIMARY,
-            cursor: "default",
-          }}
+          style={{ borderColor: BORDER_STRONG, color: TEXT_PRIMARY, cursor: "default" }}
         />
         <button
           onClick={handleGenerate}
@@ -344,11 +312,8 @@ function ScriptDemo() {
           )}
           {state === "generating" ? "Writing script…" : "Generate script"}
         </button>
-        <p
-          className="mt-4 text-[13px] leading-[1.6]"
-          style={{ color: TEXT_TERTIARY }}
-        >
-          This is the same generator running inside the product plain English
+        <p className="mt-4 text-[13px] leading-[1.6]" style={{ color: TEXT_TERTIARY }}>
+          This is the same generator running inside the product — plain English
           in, a runnable k6 script out, wired to the exact route you're
           diagnosing.
         </p>
@@ -364,11 +329,7 @@ function ScriptDemo() {
       >
         <CodeWindowChrome fileName="checkout-load.k6.js" />
         {state === "done" ? (
-          <Highlight
-            code={DEMO_SCRIPT}
-            language="javascript"
-            theme={themes.vsDark}
-          >
+          <Highlight code={DEMO_SCRIPT} language="javascript" theme={themes.vsDark}>
             {({ className, tokens, getLineProps, getTokenProps }) => (
               <pre
                 className={className}
@@ -397,16 +358,13 @@ function ScriptDemo() {
             className="flex h-[220px] items-center justify-center text-[13px]"
             style={{ color: "#6b6b64" }}
           >
-            {state === "generating"
-              ? "Writing script…"
-              : "Waiting on a scenario"}
+            {state === "generating" ? "Writing script…" : "Waiting on a scenario"}
           </div>
         )}
       </div>
     </div>
   );
 }
-
 
 interface TelemetryTick {
   t: number;
@@ -424,25 +382,13 @@ function useLiveTelemetry() {
     const step = () => {
       const s = stateRef.current;
       s.cpu = Math.min(92, Math.max(18, s.cpu + (Math.random() - 0.5) * 10));
-      s.memory = Math.min(
-        560,
-        Math.max(260, s.memory + (Math.random() - 0.5) * 24),
-      );
+      s.memory = Math.min(560, Math.max(260, s.memory + (Math.random() - 0.5) * 24));
       s.p50 = Math.min(140, Math.max(38, s.p50 + (Math.random() - 0.5) * 12));
-      s.p95 = Math.min(
-        320,
-        Math.max(s.p50 + 30, s.p95 + (Math.random() - 0.5) * 22),
-      );
+      s.p95 = Math.min(320, Math.max(s.p50 + 30, s.p95 + (Math.random() - 0.5) * 22));
       setHistory((prev) =>
         [
           ...prev,
-          {
-            t: Date.now(),
-            cpu: s.cpu,
-            memory: s.memory,
-            p50: s.p50,
-            p95: s.p95,
-          },
+          { t: Date.now(), cpu: s.cpu, memory: s.memory, p50: s.p50, p95: s.p95 },
         ].slice(-24),
       );
     };
@@ -466,10 +412,7 @@ function LiveStat({
   alert?: boolean;
 }) {
   return (
-    <div
-      className="rounded-xl border px-4 py-3"
-      style={{ borderColor: BORDER_STRONG, background: BG }}
-    >
+    <div className="rounded-xl border px-4 py-3" style={{ borderColor: BORDER_STRONG, background: BG }}>
       <div
         className="flex items-center gap-1.5 text-[10.5px] font-medium uppercase tracking-[0.06em]"
         style={{ color: TEXT_QUIET }}
@@ -479,18 +422,10 @@ function LiveStat({
       </div>
       <div
         className="mt-1.5 flex items-center gap-1.5 text-[18px] font-semibold"
-        style={{
-          color: TEXT_PRIMARY,
-          fontFamily: "'Berkeley Mono', ui-monospace, monospace",
-        }}
+        style={{ color: TEXT_PRIMARY, fontFamily: "'Berkeley Mono', ui-monospace, monospace" }}
       >
         {value}
-        {alert && (
-          <span
-            className="h-1.5 w-1.5 rounded-full"
-            style={{ background: ERROR }}
-          />
-        )}
+        {alert && <span className="h-1.5 w-1.5 rounded-full" style={{ background: ERROR }} />}
       </div>
     </div>
   );
@@ -501,99 +436,49 @@ function LiveTelemetryDemo() {
   const latest = history[history.length - 1];
 
   return (
-    <div
-      className="rounded-2xl border p-6"
-      style={{ borderColor: BORDER, background: SURFACE }}
-    >
+    <div className="rounded-2xl border p-6" style={{ borderColor: BORDER, background: SURFACE }}>
       <div className="mb-5 flex items-center justify-between">
-        <span
-          className="flex items-center gap-1.5 text-[13px] font-semibold"
-          style={{ color: TEXT_PRIMARY }}
-        >
+        <span className="flex items-center gap-1.5 text-[13px] font-semibold" style={{ color: TEXT_PRIMARY }}>
           <Activity size={14} style={{ color: TEXT_TERTIARY }} />
           Container health · POST /checkout
         </span>
         <span
-          className="flex items-center gap-1.5 text-[11px] font-semibold"
-          style={{ color: ACCENT_TEXT }}
+          className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold"
+          style={{ background: BORDER, color: TEXT_TERTIARY }}
         >
-          <span
-            className="h-1.5 w-1.5 animate-pulse rounded-full"
-            style={{ background: ACCENT }}
-          />
-          Live
+          <span className="h-1.5 w-1.5 rounded-full" style={{ background: TEXT_QUIET }} />
+          Sample data
         </span>
       </div>
 
       <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
-        <LiveStat
-          icon={Cpu}
-          label="CPU"
-          value={latest ? `${latest.cpu.toFixed(1)}%` : "—"}
-          alert={!!latest && latest.cpu > 80}
-        />
-        <LiveStat
-          icon={MemoryStick}
-          label="Memory"
-          value={latest ? `${latest.memory.toFixed(0)} MB` : "—"}
-        />
-        <LiveStat
-          icon={Activity}
-          label="Latency p50"
-          value={latest ? `${latest.p50.toFixed(0)} ms` : "—"}
-        />
-        <LiveStat
-          icon={Activity}
-          label="Latency p95"
-          value={latest ? `${latest.p95.toFixed(0)} ms` : "—"}
-          alert={!!latest && latest.p95 > 260}
-        />
+        <LiveStat icon={Cpu} label="CPU" value={latest ? `${latest.cpu.toFixed(1)}%` : "—"} alert={!!latest && latest.cpu > 80} />
+        <LiveStat icon={MemoryStick} label="Memory" value={latest ? `${latest.memory.toFixed(0)} MB` : "—"} />
+        <LiveStat icon={Activity} label="Latency p50" value={latest ? `${latest.p50.toFixed(0)} ms` : "—"} />
+        <LiveStat icon={Activity} label="Latency p95" value={latest ? `${latest.p95.toFixed(0)} ms` : "—"} alert={!!latest && latest.p95 > 260} />
       </div>
 
       <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-2">
         <div>
-          <div
-            className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em]"
-            style={{ color: TEXT_QUIET }}
-          >
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em]" style={{ color: TEXT_QUIET }}>
             CPU %
           </div>
           <ResponsiveContainer width="100%" height={140}>
             <LineChart data={history}>
               <CartesianGrid stroke={BORDER} vertical={false} />
               <XAxis dataKey="t" hide />
-              <YAxis
-                stroke={TEXT_QUIET}
-                fontSize={10}
-                width={28}
-                domain={[0, 100]}
-              />
+              <YAxis stroke={TEXT_QUIET} fontSize={10} width={28} domain={[0, 100]} />
               <Tooltip
-                contentStyle={{
-                  background: BG,
-                  border: `1px solid ${BORDER_STRONG}`,
-                  borderRadius: 8,
-                  fontSize: 11.5,
-                }}
+                contentStyle={{ background: BG, border: `1px solid ${BORDER_STRONG}`, borderRadius: 8, fontSize: 11.5 }}
                 labelFormatter={() => ""}
                 formatter={(v: number) => [`${v.toFixed(1)}%`, "CPU"]}
               />
-              <Line
-                type="monotone"
-                dataKey="cpu"
-                stroke={ACCENT_HOVER}
-                dot={false}
-                strokeWidth={2}
-                isAnimationActive={false}
-              />
+              <Line type="monotone" dataKey="cpu" stroke={ACCENT_HOVER} dot={false} strokeWidth={2} isAnimationActive={false} />
             </LineChart>
           </ResponsiveContainer>
         </div>
         <div>
-          <div
-            className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em]"
-            style={{ color: TEXT_QUIET }}
-          >
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em]" style={{ color: TEXT_QUIET }}>
             API latency (ms)
           </div>
           <ResponsiveContainer width="100%" height={140}>
@@ -602,32 +487,11 @@ function LiveTelemetryDemo() {
               <XAxis dataKey="t" hide />
               <YAxis stroke={TEXT_QUIET} fontSize={10} width={28} />
               <Tooltip
-                contentStyle={{
-                  background: BG,
-                  border: `1px solid ${BORDER_STRONG}`,
-                  borderRadius: 8,
-                  fontSize: 11.5,
-                }}
+                contentStyle={{ background: BG, border: `1px solid ${BORDER_STRONG}`, borderRadius: 8, fontSize: 11.5 }}
                 labelFormatter={() => ""}
               />
-              <Line
-                type="monotone"
-                dataKey="p50"
-                stroke={TEXT_TERTIARY}
-                dot={false}
-                strokeWidth={1.5}
-                isAnimationActive={false}
-                name="p50"
-              />
-              <Line
-                type="monotone"
-                dataKey="p95"
-                stroke={ACCENT_HOVER}
-                dot={false}
-                strokeWidth={2}
-                isAnimationActive={false}
-                name="p95"
-              />
+              <Line type="monotone" dataKey="p50" stroke={TEXT_TERTIARY} dot={false} strokeWidth={1.5} isAnimationActive={false} name="p50" />
+              <Line type="monotone" dataKey="p95" stroke={ACCENT_HOVER} dot={false} strokeWidth={2} isAnimationActive={false} name="p95" />
             </LineChart>
           </ResponsiveContainer>
         </div>
@@ -640,36 +504,24 @@ const STAGES = [
   {
     tag: "1.0  Diagnose",
     title: "Here's what's wrong. Nothing else.",
-    body: "No fix, no diff, no code yet. Axiom reads live traces, logs, and metrics from SigNoz and hands back a plain-English root cause missing index, N+1 queries, a cold cache exactly like a senior engineer would before touching anything.",
+    body: "No fix yet. Axiom reads live traces and metrics from SigNoz and states the root cause in plain English — missing index, N+1 query, cold cache — exactly like a senior engineer would before touching anything.",
   },
   {
     tag: "2.0  Propose",
-    title: "One bug, several fixes",
-    body: "There is rarely only one way to solve an N+1 query. Axiom proposes multiple independent strategies, each with an estimated latency and resource improvement, before a single line ships.",
+    title: "One bug, several honest fixes",
+    body: "There's rarely only one way to fix a bottleneck. Axiom writes multiple independent strategies with estimated impact — before a single line ships.",
   },
   {
     tag: "3.0  Arena",
-    title: "Three isolated environments. One fair fight.",
-    body: "Every candidate strategy is deployed to its own sandbox and hit with the exact same workload, back to back so the comparison that follows is never apples to oranges.",
+    title: "Three sandboxes. One fair fight.",
+    body: "Every strategy gets its own isolated container and the exact same workload, back to back. The comparison that follows is measured, never assumed.",
   },
 ];
 
 const BENCHMARK_ROWS = [
-  {
-    metric: "Latency (p99)",
-    original: "2.5 s",
-    a: "1.3 s",
-    b: "620 ms",
-    c: "780 ms",
-  },
+  { metric: "Latency (p99)", original: "2.5 s", a: "1.3 s", b: "620 ms", c: "780 ms" },
   { metric: "CPU", original: "72%", a: "61%", b: "38%", c: "42%" },
-  {
-    metric: "Memory",
-    original: "510 MB",
-    a: "480 MB",
-    b: "320 MB",
-    c: "360 MB",
-  },
+  { metric: "Memory", original: "510 MB", a: "480 MB", b: "320 MB", c: "360 MB" },
   { metric: "DB Queries", original: "28", a: "18", b: "4", c: "12" },
   { metric: "Error Rate", original: "8%", a: "2%", b: "0.2%", c: "0.6%" },
 ];
@@ -695,18 +547,13 @@ export default function Landing() {
   }, [status, navigate]);
 
   return (
-    <div
-      className="min-h-screen antialiased"
-      style={{ background: BG, color: TEXT_SECONDARY, fontFamily: SANS }}
-    >
+    <div className="min-h-screen antialiased" style={{ background: BG, color: TEXT_SECONDARY, fontFamily: SANS }}>
       {/* ---------- NAV ---------- */}
       <header
         className="fixed top-0 left-0 right-0 z-50 transition-colors duration-300"
         style={{
           background: scrolled ? `${BG}E6` : "transparent",
-          borderBottom: scrolled
-            ? `1px solid ${BORDER}`
-            : "1px solid transparent",
+          borderBottom: scrolled ? `1px solid ${BORDER}` : "1px solid transparent",
           backdropFilter: scrolled ? "blur(10px)" : "none",
         }}
       >
@@ -715,10 +562,7 @@ export default function Landing() {
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
               <path d="M10 0L20 10L10 20L0 10L10 0Z" fill={ACCENT} />
             </svg>
-            <span
-              className="text-[16px] font-semibold tracking-[-0.011em]"
-              style={{ color: TEXT_PRIMARY }}
-            >
+            <span className="text-[16px] font-semibold tracking-[-0.011em]" style={{ color: TEXT_PRIMARY }}>
               Axiom AI
             </span>
           </div>
@@ -746,16 +590,13 @@ export default function Landing() {
               className="max-w-[520px] text-[46px] md:text-[56px] font-semibold leading-[1.05] tracking-[-0.02em]"
               style={{ color: TEXT_PRIMARY }}
             >
-              Prove your backend is fast. Before you ship.
+              It doesn't guess the fix. It benchmarks it.
             </h1>
-            <p
-              className="max-w-[460px] text-[16px] leading-[1.55]"
-              style={{ color: TEXT_TERTIARY }}
-            >
-              Axiom AI diagnoses the bottleneck, proposes several independent
-              fixes, benchmarks every one in an isolated sandbox, and opens the
-              pull request for the one that actually wins with the numbers to
-              prove it.
+            <p className="max-w-[460px] text-[16px] leading-[1.55]" style={{ color: TEXT_TERTIARY }}>
+              Axiom AI reads your live SigNoz telemetry, finds the real
+              bottleneck, writes multiple candidate fixes, and runs each one
+              in its own sandbox under identical load — then opens a PR for
+              whichever one actually won.
             </p>
             <div className="mt-2 flex items-center gap-3">
               <ConnectGithubButton />
@@ -769,10 +610,7 @@ export default function Landing() {
             </div>
           </div>
 
-          <DiffViewer
-            fileName="src/routes/orders.ts"
-            unifiedDiff={WINNING_DIFF}
-          />
+          <DiffViewer fileName="src/routes/orders.ts" unifiedDiff={WINNING_DIFF} />
         </div>
       </section>
 
@@ -780,25 +618,16 @@ export default function Landing() {
       <section className="px-6 pb-24">
         <div className="mx-auto max-w-[1200px]">
           <div className="mb-8 flex flex-col items-start gap-3">
-            <span
-              className="text-[12px]"
-              style={{ fontFamily: "monospace", color: TEXT_QUIET }}
-            >
+            <span className="text-[12px]" style={{ fontFamily: "monospace", color: TEXT_QUIET }}>
               0.0 Observability
             </span>
-            <h2
-              className="text-[32px] font-semibold leading-[1.1] tracking-[-0.02em]"
-              style={{ color: TEXT_PRIMARY }}
-            >
-              Watching the route while you read this.
+            <h2 className="text-[32px] font-semibold leading-[1.1] tracking-[-0.02em]" style={{ color: TEXT_PRIMARY }}>
+              This is what SigNoz sees, live.
             </h2>
-            <p
-              className="max-w-[560px] text-[15.5px]"
-              style={{ color: TEXT_TERTIARY }}
-            >
-              CPU, memory, and p50/p95 latency for the endpoint above, streamed
-              straight from telemetry this is the same panel that sits inside
-              the workspace.
+            <p className="max-w-[560px] text-[15.5px]" style={{ color: TEXT_TERTIARY }}>
+              CPU, memory, and p50/p95 latency for the endpoint above — the
+              same panel that runs inside the workspace once your repo is
+              connected.
             </p>
           </div>
           <LiveTelemetryDemo />
@@ -806,31 +635,18 @@ export default function Landing() {
       </section>
 
       {/* ---------- STAGES ---------- */}
-      <section
-        id="how-it-works"
-        className="px-6 py-20"
-        style={{ background: SURFACE }}
-      >
+      <section id="how-it-works" className="px-6 py-20" style={{ background: SURFACE }}>
         <div className="mx-auto max-w-[1200px]">
           <div className="grid grid-cols-1 gap-10 md:grid-cols-3">
             {STAGES.map((stage) => (
               <div key={stage.title}>
-                <span
-                  className="text-[12px]"
-                  style={{ fontFamily: "monospace", color: TEXT_QUIET }}
-                >
+                <span className="text-[12px]" style={{ fontFamily: "monospace", color: TEXT_QUIET }}>
                   {stage.tag}
                 </span>
-                <h3
-                  className="mt-2 text-[20px] font-semibold leading-[1.25]"
-                  style={{ color: TEXT_PRIMARY }}
-                >
+                <h3 className="mt-2 text-[20px] font-semibold leading-[1.25]" style={{ color: TEXT_PRIMARY }}>
                   {stage.title}
                 </h3>
-                <p
-                  className="mt-3 text-[14.5px] leading-[1.6]"
-                  style={{ color: TEXT_TERTIARY }}
-                >
+                <p className="mt-3 text-[14.5px] leading-[1.6]" style={{ color: TEXT_TERTIARY }}>
                   {stage.body}
                 </p>
               </div>
@@ -843,25 +659,15 @@ export default function Landing() {
       <section className="px-6 py-24">
         <div className="mx-auto max-w-[1200px]">
           <div className="mb-10 flex flex-col items-start gap-3">
-            <span
-              className="text-[12px]"
-              style={{ fontFamily: "monospace", color: TEXT_QUIET }}
-            >
+            <span className="text-[12px]" style={{ fontFamily: "monospace", color: TEXT_QUIET }}>
               2.0 Load Generator
             </span>
-            <h2
-              className="text-[38px] font-semibold leading-[1.1] tracking-[-0.02em]"
-              style={{ color: TEXT_PRIMARY }}
-            >
+            <h2 className="text-[38px] font-semibold leading-[1.1] tracking-[-0.02em]" style={{ color: TEXT_PRIMARY }}>
               Describe it. Watch it write the load test.
             </h2>
-            <p
-              className="max-w-[560px] text-[15.5px]"
-              style={{ color: TEXT_TERTIARY }}
-            >
-              Say what you want tested in plain
-              English and get back a runnable script wired to the route you're
-              benchmarking.
+            <p className="max-w-[560px] text-[15.5px]" style={{ color: TEXT_TERTIARY }}>
+              Say what you want tested in plain English and get back a
+              runnable k6 script wired to the route you're benchmarking.
             </p>
           </div>
           <ScriptDemo />
@@ -872,31 +678,19 @@ export default function Landing() {
       <section id="diff" className="px-6 py-24" style={{ background: SURFACE }}>
         <div className="mx-auto max-w-[1200px]">
           <div className="mb-10 flex flex-col items-start gap-3">
-            <span
-              className="text-[12px]"
-              style={{ fontFamily: "monospace", color: TEXT_QUIET }}
-            >
+            <span className="text-[12px]" style={{ fontFamily: "monospace", color: TEXT_QUIET }}>
               4.0 Verdict
             </span>
-            <h2
-              className="text-[38px] font-semibold leading-[1.1] tracking-[-0.02em]"
-              style={{ color: TEXT_PRIMARY }}
-            >
+            <h2 className="text-[38px] font-semibold leading-[1.1] tracking-[-0.02em]" style={{ color: TEXT_PRIMARY }}>
               The fix, reviewed like a pull request.
             </h2>
-            <p
-              className="max-w-[560px] text-[15.5px]"
-              style={{ color: TEXT_TERTIARY }}
-            >
+            <p className="max-w-[560px] text-[15.5px]" style={{ color: TEXT_TERTIARY }}>
               Once a strategy wins the benchmark, Axiom opens the exact diff
-              against your repo nothing hidden behind an AI's opinion, just
-              the change and the numbers behind it.
+              against your repo — the change and the numbers behind it,
+              nothing hidden behind an AI's opinion.
             </p>
           </div>
-          <DiffViewer
-            fileName="src/routes/orders.ts"
-            unifiedDiff={WINNING_DIFF}
-          />
+          <DiffViewer fileName="src/routes/orders.ts" unifiedDiff={WINNING_DIFF} />
         </div>
       </section>
 
@@ -904,63 +698,26 @@ export default function Landing() {
       <section className="px-6 py-24">
         <div className="mx-auto max-w-[1200px]">
           <div className="mb-10 flex flex-col items-start gap-3">
-            <span
-              className="text-[12px]"
-              style={{ fontFamily: "monospace", color: TEXT_QUIET }}
-            >
+            <span className="text-[12px]" style={{ fontFamily: "monospace", color: TEXT_QUIET }}>
               5.0 Performance Lab
             </span>
-            <h2
-              className="text-[38px] font-semibold leading-[1.1] tracking-[-0.02em]"
-              style={{ color: TEXT_PRIMARY }}
-            >
+            <h2 className="text-[38px] font-semibold leading-[1.1] tracking-[-0.02em]" style={{ color: TEXT_PRIMARY }}>
               Every strategy, measured.
             </h2>
-            <p
-              className="max-w-[560px] text-[15.5px]"
-              style={{ color: TEXT_TERTIARY }}
-            >
-              No guessing which fix is best. Axiom AI runs real load tests
-              against every candidate and reports the numbers.
+            <p className="max-w-[560px] text-[15.5px]" style={{ color: TEXT_TERTIARY }}>
+              No AI opinion in this table. Axiom runs real load tests against
+              every candidate and reports what actually happened.
             </p>
           </div>
-          <div
-            className="overflow-hidden rounded-2xl border"
-            style={{ borderColor: BORDER, background: BG }}
-          >
+          <div className="overflow-hidden rounded-2xl border" style={{ borderColor: BORDER, background: BG }}>
             <table className="w-full border-collapse text-left">
               <thead>
                 <tr className="border-b" style={{ borderColor: BORDER }}>
-                  <th
-                    className="px-6 py-4 text-[12px] font-medium"
-                    style={{ color: TEXT_QUIET }}
-                  >
-                    Metric
-                  </th>
-                  <th
-                    className="px-6 py-4 text-[12px] font-medium"
-                    style={{ color: TEXT_QUIET }}
-                  >
-                    Original
-                  </th>
-                  <th
-                    className="px-6 py-4 text-[12px] font-medium"
-                    style={{ color: TEXT_QUIET }}
-                  >
-                    Strategy A
-                  </th>
-                  <th
-                    className="px-6 py-4 text-[12px] font-semibold"
-                    style={{ color: ACCENT_TEXT }}
-                  >
-                    Strategy B
-                  </th>
-                  <th
-                    className="px-6 py-4 text-[12px] font-medium"
-                    style={{ color: TEXT_QUIET }}
-                  >
-                    Strategy C
-                  </th>
+                  <th className="px-6 py-4 text-[12px] font-medium" style={{ color: TEXT_QUIET }}>Metric</th>
+                  <th className="px-6 py-4 text-[12px] font-medium" style={{ color: TEXT_QUIET }}>Original</th>
+                  <th className="px-6 py-4 text-[12px] font-medium" style={{ color: TEXT_QUIET }}>Strategy A</th>
+                  <th className="px-6 py-4 text-[12px] font-semibold" style={{ color: ACCENT_TEXT }}>Strategy B</th>
+                  <th className="px-6 py-4 text-[12px] font-medium" style={{ color: TEXT_QUIET }}>Strategy C</th>
                 </tr>
               </thead>
               <tbody>
@@ -968,30 +725,12 @@ export default function Landing() {
                   <tr
                     key={row.metric}
                     style={{
-                      borderBottom:
-                        idx !== BENCHMARK_ROWS.length - 1
-                          ? `1px solid ${BORDER}`
-                          : undefined,
+                      borderBottom: idx !== BENCHMARK_ROWS.length - 1 ? `1px solid ${BORDER}` : undefined,
                     }}
                   >
-                    <td
-                      className="px-6 py-4 text-[13px]"
-                      style={{ color: TEXT_PRIMARY }}
-                    >
-                      {row.metric}
-                    </td>
-                    <td
-                      className="px-6 py-4 text-[13px]"
-                      style={{ color: TEXT_QUIET }}
-                    >
-                      {row.original}
-                    </td>
-                    <td
-                      className="px-6 py-4 text-[13px]"
-                      style={{ color: TEXT_TERTIARY }}
-                    >
-                      {row.a}
-                    </td>
+                    <td className="px-6 py-4 text-[13px]" style={{ color: TEXT_PRIMARY }}>{row.metric}</td>
+                    <td className="px-6 py-4 text-[13px]" style={{ color: TEXT_QUIET }}>{row.original}</td>
+                    <td className="px-6 py-4 text-[13px]" style={{ color: TEXT_TERTIARY }}>{row.a}</td>
                     <td className="px-6 py-4">
                       <span
                         className="rounded-[4px] px-[6px] py-[2px] text-[13px] font-semibold"
@@ -1000,12 +739,7 @@ export default function Landing() {
                         {row.b}
                       </span>
                     </td>
-                    <td
-                      className="px-6 py-4 text-[13px]"
-                      style={{ color: TEXT_TERTIARY }}
-                    >
-                      {row.c}
-                    </td>
+                    <td className="px-6 py-4 text-[13px]" style={{ color: TEXT_TERTIARY }}>{row.c}</td>
                   </tr>
                 ))}
               </tbody>
@@ -1023,12 +757,9 @@ export default function Landing() {
           >
             Ship the strategy that actually works.
           </h2>
-          <p
-            className="max-w-[420px] text-[15.5px]"
-            style={{ color: TEXT_TERTIARY }}
-          >
-            Connect your backend and let Axiom AI find, prove, and ship your
-            next optimization.
+          <p className="max-w-[420px] text-[15.5px]" style={{ color: TEXT_TERTIARY }}>
+            Connect your backend. Axiom finds the bottleneck, tests the fix,
+            and proves it — before you merge.
           </p>
           <div className="mt-2 flex items-center gap-3">
             <ConnectGithubButton />
@@ -1041,12 +772,7 @@ export default function Landing() {
         <div className="mx-auto flex max-w-[1200px] flex-col items-center justify-between gap-6 sm:flex-row">
           <div className="flex items-center gap-2">
             <svg width="16" height="16" viewBox="0 0 20 20" fill="none">
-              <path
-                d="M10 0L20 10L10 20L0 10L10 0Z"
-                stroke={TEXT_TERTIARY}
-                strokeWidth="1.2"
-                fill="none"
-              />
+              <path d="M10 0L20 10L10 20L0 10L10 0Z" stroke={TEXT_TERTIARY} strokeWidth="1.2" fill="none" />
             </svg>
             <span className="text-[13px]" style={{ color: TEXT_QUIET }}>
               © {new Date().getFullYear()} Axiom AI. All rights reserved.
@@ -1054,12 +780,7 @@ export default function Landing() {
           </div>
           <div className="flex items-center gap-6">
             {["Privacy", "Terms", "Status"].map((l) => (
-              <a
-                key={l}
-                href="#"
-                className="text-[13px]"
-                style={{ color: TEXT_QUIET }}
-              >
+              <a key={l} href="#" className="text-[13px]" style={{ color: TEXT_QUIET }}>
                 {l}
               </a>
             ))}

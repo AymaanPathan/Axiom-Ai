@@ -15,7 +15,7 @@ export interface PatchResult {
 export interface FileChangeInput {
   filePath: string;
   changeType: FileChangeType;
-  originalCode?: string; // required for "modify", ignored for "create"
+  originalCode?: string; 
   newCode: string;
 }
 
