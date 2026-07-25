@@ -1,5 +1,4 @@
 import mongoose from "mongoose";
-import { spawn } from "node:child_process";
 import { getIO } from "../config/socket.js";
 import { RunModel } from "../models/run.model.js";
 import {
@@ -11,7 +10,7 @@ import {
   nanoToMs,
 } from "./signoz.service.js";
 
-export type ContainerMetricsSource = "signoz" | "docker-cli" | "unavailable";
+export type ContainerMetricsSource = "signoz" | "unavailable";
 
 export interface MetricSnapshot {
   timestamp: number;
@@ -22,12 +21,11 @@ export interface MetricSnapshot {
   p50Ms: number;
   p95Ms: number;
   p99Ms: number;
-  // Where cpuPercent/memoryMB actually came from THIS tick. The frontend
-  // should key its "Live" / SigNoz badge off this, not assume — "signoz"
-  // means it came from SigNoz's metrics signal (docker_stats OTel receiver);
-  // "docker-cli" means SigNoz had no data point yet this tick and we fell
-  // back to a local `docker stats` read; "unavailable" means neither source
-  // returned anything (container may have just stopped).
+  // Always "signoz" when a value was actually read; "unavailable" means
+  // SigNoz had no data point for this container in the query window this
+  // tick (receiver not wired up yet, cold start, or container just
+  // stopped) — cpuPercent/memoryMB are 0 in that case, never a guessed or
+  // locally-sourced number. There is no non-SigNoz fallback in this file.
   containerMetricsSource: ContainerMetricsSource;
 }
 
@@ -63,14 +61,6 @@ const ERROR_RATE_DEGRADED_THRESHOLD = 0.05; // 5%
 // latest point," not "average over a long range."
 const CONTAINER_METRICS_QUERY_WINDOW_MS = 30_000;
 
-// Whether to fall back to `docker stats` when SigNoz has no container
-// metrics yet for this tick (e.g. receiver cold start, or it's not wired up
-// at all). Set CONTAINER_METRICS_SIGNOZ_ONLY=true in env to disable the
-// fallback entirely and always report "unavailable" instead — useful once
-// you've confirmed the receiver is reliably reporting and want the panel to
-// be strictly honest about SigNoz being the only source.
-const SIGNOZ_ONLY = process.env.CONTAINER_METRICS_SIGNOZ_ONLY === "true";
-
 interface RepoLoopState {
   intervalHandle: NodeJS.Timeout;
   containerName: string;
@@ -81,9 +71,11 @@ interface RepoLoopState {
 
 const loops = new Map<string, RepoLoopState>();
 
-// --- Container resource metrics: SigNoz primary, docker-cli fallback ----
+// --- Container resource metrics — SigNoz only, no other source ----------
 
-async function getContainerMetricsSignozFirst(containerName: string): Promise<{
+async function getContainerMetricsFromSignozOnly(
+  containerName: string,
+): Promise<{
   cpuPercent: number;
   memoryMB: number;
   source: ContainerMetricsSource;
@@ -113,131 +105,12 @@ async function getContainerMetricsSignozFirst(containerName: string): Promise<{
 
   if (warnings.length > 0) {
     console.warn(
-      `[MetricsObserver] SigNoz container metrics unavailable for "${containerName}":`,
+      `[MetricsObserver] SigNoz container metrics unavailable for "${containerName}" this tick:`,
       warnings,
     );
   }
 
-  if (SIGNOZ_ONLY) {
-    return { cpuPercent: 0, memoryMB: 0, source: "unavailable" };
-  }
-
-  const fallback =
-    await getContainerResourceMetricsFromDockerCli(containerName);
-  if (fallback) {
-    return { ...fallback, source: "docker-cli" };
-  }
-
   return { cpuPercent: 0, memoryMB: 0, source: "unavailable" };
-}
-
-// --- Fallback: container resource metrics via `docker stats` -----------
-//
-// Only used when SigNoz has no data point yet for this container this tick
-// (receiver cold start / not configured). Queries Docker directly for the
-// one container we started — no OTel collector round trip, so it's always
-// available as a last resort, but it is NOT SigNoz telemetry and is tagged
-// as such in every MetricSnapshot.
-
-const DOCKER_STATS_TIMEOUT_MS = 5_000;
-
-interface DockerStatsLine {
-  CPUPerc?: string; // e.g. "12.34%"
-  MemUsage?: string; // e.g. "123.4MiB / 512MiB"
-}
-
-// Converts docker stats' human-readable units ("123.4MiB", "1.2GiB",
-// "512KiB") to MB. Falls back to 0 for anything unrecognized rather than
-// throwing — a parse miss here shouldn't take down the whole metrics tick.
-function parseMemToMB(raw: string): number {
-  const match = raw.trim().match(/^([\d.]+)\s*([KMGT]?i?B)$/i);
-  if (!match) return 0;
-  const value = parseFloat(match[1]);
-  const unit = match[2].toUpperCase();
-  const multiplierToMB: Record<string, number> = {
-    B: 1 / (1024 * 1024),
-    KB: 1 / 1024,
-    KIB: 1 / 1024,
-    MB: 1,
-    MIB: 1,
-    GB: 1024,
-    GIB: 1024,
-    TB: 1024 * 1024,
-    TIB: 1024 * 1024,
-  };
-  return Math.round(value * (multiplierToMB[unit] ?? 1) * 100) / 100;
-}
-
-async function getContainerResourceMetricsFromDockerCli(
-  containerName: string,
-): Promise<{ cpuPercent: number; memoryMB: number } | null> {
-  return new Promise((resolve) => {
-    const child = spawn("docker", [
-      "stats",
-      containerName,
-      "--no-stream",
-      "--format",
-      "{{json .}}",
-    ]);
-
-    let stdout = "";
-    let settled = false;
-
-    const timeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill("SIGKILL");
-      resolve(null);
-    }, DOCKER_STATS_TIMEOUT_MS);
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-
-    child.on("error", (err) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      console.error(
-        `[MetricsObserver] docker stats spawn error for ${containerName}:`,
-        err.message,
-      );
-      resolve(null);
-    });
-
-    child.on("close", (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-
-      // Non-zero exit or empty output almost always means the container
-      // already stopped between this tick and the last one — treat as
-      // "no data right now" rather than logging noise every 5s.
-      if (code !== 0 || !stdout.trim()) {
-        resolve(null);
-        return;
-      }
-
-      try {
-        const stat: DockerStatsLine = JSON.parse(stdout.trim().split("\n")[0]);
-        const cpuPercent =
-          parseFloat(String(stat.CPUPerc ?? "0").replace("%", "")) || 0;
-        const memUsedRaw =
-          String(stat.MemUsage ?? "0MiB")
-            .split("/")[0]
-            ?.trim() ?? "0MiB";
-        resolve({ cpuPercent, memoryMB: parseMemToMB(memUsedRaw) });
-      } catch (err) {
-        console.error(
-          `[MetricsObserver] Failed to parse docker stats output for ${containerName}:`,
-          err,
-          "raw:",
-          stdout.slice(0, 300),
-        );
-        resolve(null);
-      }
-    });
-  });
 }
 
 // --- SigNoz aggregate (whole service, no route filter) ----------------
@@ -314,7 +187,7 @@ export function startMetricsLoop(
     history: [],
     intervalHandle: setInterval(async () => {
       const [containerMetrics, aggregate] = await Promise.all([
-        getContainerMetricsSignozFirst(containerName),
+        getContainerMetricsFromSignozOnly(containerName),
         getServiceAggregate(serviceName, AGGREGATE_WINDOW_MS).catch(() => ({
           requestRate: 0,
           errorRate: 0,
