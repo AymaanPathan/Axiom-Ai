@@ -1,4 +1,5 @@
 import { resolveConnectedFiles } from "../parsing/connectedFiles.service.js";
+import { getRouteTelemetryViaMcp } from "./signozMcp.service.js";
 
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 // Groq's free-tier Llama model — fast and generous rate limits, good fit
@@ -10,7 +11,43 @@ const GROQ_MODEL = "llama-3.3-70b-versatile";
 // free-tier rate limit re-explaining the same route on every page view.
 const explanationCache = new Map<string, string>();
 
-function buildPrompt(codeContext: string, requestBodyFields: string[]): string {
+// NEW — pulls live telemetry text via the SigNoz MCP server and folds it
+// into the explanation prompt, so "what does this endpoint do" is grounded
+// in real recent traffic (request volume, error rate) instead of purely
+// static code reading. Best-effort: if MCP isn't reachable, or no matching
+// tool exists yet, or there's simply no traffic for this route, explanation
+// generation still proceeds without it — this is enrichment, not a
+// dependency, so it should never be the reason /explain fails.
+async function tryGetMcpTelemetryContext(
+  serviceName: string,
+  method: string,
+  routePath: string,
+): Promise<string | null> {
+  try {
+    const end = Date.now();
+    const start = end - 15 * 60 * 1000; // last 15 minutes
+    const text = await getRouteTelemetryViaMcp(
+      serviceName,
+      method,
+      routePath,
+      start,
+      end,
+    );
+    return text || null;
+  } catch (err) {
+    console.warn(
+      "[Explain] SigNoz MCP telemetry lookup skipped:",
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
+}
+
+function buildPrompt(
+  codeContext: string,
+  requestBodyFields: string[],
+  mcpTelemetryContext: string | null,
+): string {
   return `You're explaining what a backend API endpoint is FOR to someone non-technical — a product manager, a founder, a new hire — not a developer reading the code. They don't care about functions, files, variables, or syntax. They want to know what real-world thing this powers.
 
 Here is the code behind the endpoint, for your own understanding only — do not describe it, quote it, or mention file names, function names, or code structure in your answer:
@@ -20,6 +57,12 @@ ${codeContext}
 ${
   requestBodyFields.length > 0
     ? `The data it works with includes: ${requestBodyFields.join(", ")}`
+    : ""
+}
+
+${
+  mcpTelemetryContext
+    ? `Recent live traffic for this endpoint (from SigNoz, via its MCP server): ${mcpTelemetryContext}`
     : ""
 }
 
@@ -37,6 +80,12 @@ export async function explainEndpoint(
   repositoryId: string,
   file: string,
   line: number,
+  // NEW — optional. Pass this from call sites that already know the
+  // service name + route (RepoDetail / ApiWorkspace both have this on
+  // hand already via `repo.githubFullName` and the selected route). When
+  // omitted, explain still works exactly as before — just without the
+  // live-traffic context folded in.
+  routeContext?: { serviceName: string; method: string; routePath: string },
 ): Promise<string> {
   const cacheKey = `${repositoryId}:${file}:${line}`;
   const cached = explanationCache.get(cacheKey);
@@ -59,6 +108,14 @@ export async function explainEndpoint(
     .map((f) => `// ${f.path} (${f.role})\n${f.content}`)
     .join("\n\n");
 
+  const mcpTelemetryContext = routeContext
+    ? await tryGetMcpTelemetryContext(
+        routeContext.serviceName,
+        routeContext.method,
+        routeContext.routePath,
+      )
+    : null;
+
   const response = await fetch(GROQ_API_URL, {
     method: "POST",
     headers: {
@@ -73,7 +130,14 @@ export async function explainEndpoint(
           content:
             "You are a product-savvy translator who explains what backend features do in plain business language for non-technical stakeholders. You never use code terminology, function names, or technical jargon — you describe the real-world use case and outcome only.",
         },
-        { role: "user", content: buildPrompt(codeContext, requestBodyFields) },
+        {
+          role: "user",
+          content: buildPrompt(
+            codeContext,
+            requestBodyFields,
+            mcpTelemetryContext,
+          ),
+        },
       ],
       temperature: 0.3,
       max_tokens: 400,
