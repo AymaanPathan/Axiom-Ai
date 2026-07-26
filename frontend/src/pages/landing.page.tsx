@@ -595,7 +595,7 @@ export default function Landing() {
             <p className="max-w-[460px] text-[16px] leading-[1.55]" style={{ color: TEXT_TERTIARY }}>
               Axiom AI reads your live SigNoz telemetry, finds the real
               bottleneck, writes multiple candidate fixes, and runs each one
-              in its own sandbox under identical load — then opens a PR for
+              in its own sandbox under identical load then opens a PR for
               whichever one actually won.
             </p>
             <div className="mt-2 flex items-center gap-3">
