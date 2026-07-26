@@ -18,6 +18,7 @@ import { generateTrafficForRoute } from "../services/trafficGenerator.service.js
 import {
   DbOperationBreakdown,
   getDbOperationBreakdown,
+  getOrCreateRouteDashboardUrl,
   getRouteTelemetry,
   RouteTelemetry,
 } from "../services/signoz.service.js";
@@ -292,11 +293,30 @@ router.get("/:id/explain", requireAuth, async (req: AuthedRequest, res) => {
   }
 
   try {
+    // Match the route by file+line (this handler only receives file/line
+    // in the query string, not routeIndex) so we can hand real
+    // service/method/route info to explainEndpoint's optional
+    // routeContext param. Without this match, MCP telemetry enrichment
+    // silently never fires — explainEndpoint runs fine either way, it
+    // just skips the live-traffic context.
+    const targetLine = Math.max(1, Number(line) || 1);
+    const matchedRoute = repository.discoveredRoutes.find(
+      (r) => r.file === file && r.line === targetLine,
+    );
+    const routeContext = matchedRoute
+      ? {
+          serviceName: repository.githubFullName.split("/")[1],
+          method: matchedRoute.method,
+          routePath: matchedRoute.routePath,
+        }
+      : undefined;
+
     const explanation = await explainEndpoint(
       repoRoot,
       repository._id.toString(),
       file,
-      Math.max(1, Number(line) || 1),
+      targetLine,
+      routeContext,
     );
     res.json({ explanation });
   } catch (err) {
@@ -388,7 +408,20 @@ router.get("/:id/telemetry", requireAuth, async (req: AuthedRequest, res) => {
       Number(start),
       Number(end),
     );
-    res.json(telemetry);
+
+    // Best-effort: attach a real SigNoz dashboard link for this route.
+    // Cached per (service, method, route) inside getOrCreateRouteDashboardUrl,
+    // so this only actually hits SigNoz's dashboard API once per route,
+    // ever. Never blocks or fails the telemetry response — if dashboard
+    // creation errors out, dashboardUrl is just null and the rest of the
+    // telemetry still returns normally.
+    const dashboardUrl = await getOrCreateRouteDashboardUrl(
+      serviceName,
+      route.method,
+      route.routePath,
+    );
+
+    res.json({ ...telemetry, dashboardUrl });
   } catch (err) {
     console.error("Failed to fetch SigNoz telemetry:", err);
     const message =

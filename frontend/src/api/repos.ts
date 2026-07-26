@@ -73,6 +73,7 @@ export interface RouteTelemetry {
   db: { avgDurationMs: number | null; callCount: number };
   external: { avgDurationMs: number | null; callCount: number };
   warnings: string[];
+  dashboardUrl?: string | null; 
 }
 
 export interface LoadScriptResult {

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 export interface RouteTelemetry {
   service: string;
   method: string;
@@ -10,16 +11,89 @@ export interface RouteTelemetry {
   db: { avgDurationMs: number | null; callCount: number };
   external: { avgDurationMs: number | null; callCount: number };
   warnings: string[];
+  dashboardUrl?: string | null;
 }
 
+// NOTE: these two were previously hardcoded, unverified guesses — see
+// ensureFieldKeysVerified() below, which checks them against this
+// workspace's real trace field keys (the same signoz_get_field_keys path
+// that already confirmed ROUTE_ATTRIBUTE/DURATION_ATTRIBUTE below) and
+// self-corrects them once, on first real use, instead of trusting the
+// guess for the lifetime of the process.
 export const SEMCONV = {
-  method: "httpMethod",
-  statusCode: "responseStatusCode",
+  method: "http_method", // unverified guess — corrected by ensureFieldKeysVerified() if wrong
+  statusCode: "response_status_code",
 };
 
-export const ROUTE_ATTRIBUTE = "http.route";
-export const SERVICE_ATTRIBUTE = "service.name";
-export const DURATION_ATTRIBUTE = "durationNano";
+export const ROUTE_ATTRIBUTE = "http.route"; // confirmed via signoz_get_field_keys(signal="traces", searchText="route")
+export let SERVICE_ATTRIBUTE = "service.name"; // unverified guess — corrected by ensureFieldKeysVerified() if wrong
+
+// Runs once (memoized), best-effort: asks the SigNoz MCP server what the
+// real "method" and "service" field keys are for this workspace's traces,
+// and corrects SEMCONV.method / SERVICE_ATTRIBUTE in place if they were
+// wrong. If the MCP server isn't running, this is a no-op and every filter
+// in this file keeps using the hardcoded guesses exactly as before — same
+// "enrichment, not dependency" contract used everywhere else MCP is
+// touched in this codebase. Every exported function below that builds a
+// filter using SEMCONV.method or SERVICE_ATTRIBUTE calls this first.
+let fieldKeyVerification: Promise<void> | null = null;
+
+export async function ensureFieldKeysVerified(): Promise<void> {
+  if (fieldKeyVerification) return fieldKeyVerification;
+
+  fieldKeyVerification = (async () => {
+    try {
+      const { discoverMethodFieldKey, discoverServiceFieldKey } =
+        await import("./signozMcp.service.js");
+      const [methodKey, serviceKey] = await Promise.all([
+        discoverMethodFieldKey().catch(() => null),
+        discoverServiceFieldKey().catch(() => null),
+      ]);
+
+      if (methodKey && methodKey !== SEMCONV.method) {
+        console.warn(
+          `[SigNoz] "method" field key was wrong: guessed "${SEMCONV.method}", ` +
+            `live workspace uses "${methodKey}" — every filter using it was ` +
+            `silently matching zero spans. Correcting for this process.`,
+        );
+        SEMCONV.method = methodKey;
+      } else if (!methodKey) {
+        console.warn(
+          `[SigNoz] Could not verify the "method" field key (MCP server unreachable?). ` +
+            `Still using unverified guess "${SEMCONV.method}" — if dashboards/telemetry ` +
+            `show no data, check the real key via the SigNoz UI's filter-bar autocomplete.`,
+        );
+      }
+
+      if (serviceKey && serviceKey !== SERVICE_ATTRIBUTE) {
+        console.warn(
+          `[SigNoz] "service" field key was wrong: guessed "${SERVICE_ATTRIBUTE}", ` +
+            `live workspace uses "${serviceKey}". Correcting for this process.`,
+        );
+        SERVICE_ATTRIBUTE = serviceKey;
+      }
+    } catch (err) {
+      console.warn(
+        "[SigNoz] Field-key self-verification skipped (MCP server unreachable) — " +
+          "keeping existing guesses:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  })();
+
+  return fieldKeyVerification;
+}
+// "duration_nano" confirmed via signoz_get_field_keys(signal="traces",
+// searchText="duration") against this workspace's live SigNoz instance —
+// it's the only duration-related field that exists (span-context, unit ns).
+// Previous value "durationNano" (camelCase) was the same unverified-guess
+// pattern as the old SEMCONV.method value, and it's used inside every
+// latency/duration AGGREGATION in this file (p50/p95/p99/avg in
+// getRouteTelemetry, getServiceAggregate; avg/total in
+// getDbOperationBreakdown) — not just an equality filter, so this one was
+// silently returning 0 for every latency number in the file rather than
+// erroring or just failing to match a filter.
+export const DURATION_ATTRIBUTE = "duration_nano";
 
 interface Aggregation {
   expression: string;
@@ -35,6 +109,261 @@ function enqueueSignozCall<T>(fn: () => Promise<T>): Promise<T> {
     () => undefined,
   );
   return run;
+}
+
+// --- SigNoz dashboard creation ---------------------------------------------
+// Template shape confirmed against a live-exported dashboard from this
+// SigNoz instance. Only widget titles, filter expressions, and fresh
+// ids change per call — everything else is copied from the confirmed
+// export so we don't drift from what this SigNoz version accepts.
+const dashboardUrlCache = new Map<string, string>();
+
+function buildTracesWidget(opts: {
+  title: string;
+  panelTypes: "graph" | "value";
+  aggregationExpression: string;
+  filterExpression: string;
+}) {
+  const widgetId = randomUUID();
+  // count() on a "value" panel (Request Count / Error Count) should SUM
+  // across the window, not average per-bucket — "avg" here was silently
+  // showing an averaged-per-bucket count instead of a true total.
+  const reduceTo = opts.panelTypes === "value" ? "sum" : "avg";
+  return {
+    id: widgetId,
+    title: opts.title,
+    description: "",
+    panelTypes: opts.panelTypes,
+    isLogScale: false,
+    opacity: "1",
+    nullZeroValues: "zero",
+    fillSpans: false,
+    stackedBarChart: false,
+    softMin: 0,
+    softMax: 0,
+    bucketCount: 30,
+    bucketWidth: 0,
+    thresholds: [],
+    yAxisUnit: "",
+    timePreferance: "GLOBAL_TIME",
+    query: {
+      queryType: "builder",
+      unit: "",
+      builder: {
+        queryData: [
+          {
+            queryName: "A",
+            dataSource: "traces",
+            aggregations: [
+              {
+                expression: opts.aggregationExpression,
+                metricName: "",
+                temporality: "",
+                timeAggregation: "avg",
+                spaceAggregation: "sum",
+                reduceTo,
+              },
+            ],
+            filter: { expression: opts.filterExpression },
+            groupBy: [],
+            having: { expression: "" },
+            orderBy: [],
+            limit: null,
+            stepInterval: null,
+            functions: [],
+            expression: "A",
+            disabled: false,
+            source: "",
+            legend: "",
+          },
+        ],
+        queryFormulas: [],
+        queryTraceOperator: [],
+      },
+      promql: [{ name: "A", query: "", legend: "", disabled: false }],
+      clickhouse_sql: [{ name: "A", query: "", legend: "", disabled: false }],
+    },
+    selectedTracesFields: [
+      {
+        name: "service.name",
+        fieldContext: "resource",
+        fieldDataType: "string",
+        signal: "traces",
+      },
+      {
+        name: "name",
+        fieldContext: "span",
+        fieldDataType: "string",
+        signal: "traces",
+      },
+      {
+        name: "duration_nano",
+        fieldContext: "span",
+        fieldDataType: "",
+        signal: "traces",
+      },
+      {
+        name: "http_method",
+        fieldContext: "span",
+        fieldDataType: "",
+        signal: "traces",
+      },
+      {
+        name: "response_status_code",
+        fieldContext: "span",
+        fieldDataType: "",
+        signal: "traces",
+      },
+    ],
+    selectedLogFields: [
+      {
+        name: "timestamp",
+        fieldContext: "log",
+        fieldDataType: "",
+        signal: "logs",
+        isIndexed: false,
+        dataType: "",
+      },
+      {
+        name: "body",
+        fieldContext: "log",
+        fieldDataType: "",
+        signal: "logs",
+        isIndexed: false,
+        dataType: "",
+      },
+    ],
+    columnUnits: {},
+    customLegendColors: {},
+    contextLinks: { linksData: [] },
+    decimalPrecision: 2,
+    legendPosition: "bottom",
+    lineInterpolation: "spline",
+    lineStyle: "solid",
+    mergeAllActiveQueries: false,
+    showPoints: false,
+    spanGaps: true,
+  };
+}
+
+function buildRouteDashboardPayload(
+  serviceName: string,
+  method: string,
+  routePath: string,
+) {
+  const escService = serviceName.replace(/'/g, "\\'");
+  const escRoute = routePath.replace(/'/g, "\\'");
+  const baseFilter = `${SERVICE_ATTRIBUTE} = '${escService}' AND ${SEMCONV.method} = '${method}' AND ${ROUTE_ATTRIBUTE} = '${escRoute}'`;
+
+  const latencyWidget = buildTracesWidget({
+    title: "P95 Latency (ms)",
+    panelTypes: "graph",
+    aggregationExpression: `p95(${DURATION_ATTRIBUTE})`,
+    filterExpression: baseFilter,
+  });
+  const requestCountWidget = buildTracesWidget({
+    title: "Request Count",
+    panelTypes: "value",
+    aggregationExpression: "count()",
+    filterExpression: baseFilter,
+  });
+  const errorCountWidget = buildTracesWidget({
+    title: "Error Count",
+    panelTypes: "value",
+    aggregationExpression: "count()",
+    filterExpression: `${baseFilter} AND has_error = true`,
+  });
+
+  return {
+    name: `Axiom — ${method} ${routePath} (${serviceName})`,
+    description: "Auto-created by Axiom AI for live route telemetry.",
+    tags: ["axiom-ai"],
+    variables: {},
+    widgets: [latencyWidget, requestCountWidget, errorCountWidget],
+    layout: [
+      {
+        i: latencyWidget.id,
+        x: 0,
+        y: 0,
+        w: 6,
+        h: 6,
+        moved: false,
+        static: false,
+      },
+      {
+        i: requestCountWidget.id,
+        x: 6,
+        y: 0,
+        w: 3,
+        h: 6,
+        moved: false,
+        static: false,
+      },
+      {
+        i: errorCountWidget.id,
+        x: 9,
+        y: 0,
+        w: 3,
+        h: 6,
+        moved: false,
+        static: false,
+      },
+    ],
+    panelMap: {},
+    version: "v5",
+    title: `Axiom — ${method} ${routePath} (${serviceName})`,
+  };
+}
+
+export async function getOrCreateRouteDashboardUrl(
+  serviceName: string,
+  method: string,
+  routePath: string,
+): Promise<string | null> {
+  const cacheKey = `${serviceName}:${method}:${routePath}`;
+  const cached = dashboardUrlCache.get(cacheKey);
+  if (cached) return cached;
+
+  await ensureFieldKeysVerified();
+  const { baseUrl, apiKey } = getConfig();
+
+  try {
+    const res = await fetch(`${baseUrl}/api/v1/dashboards`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "SIGNOZ-API-KEY": apiKey },
+      body: JSON.stringify(
+        buildRouteDashboardPayload(serviceName, method, routePath),
+      ),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      console.warn(
+        `[SigNoz] Dashboard creation failed (${res.status}) for ${cacheKey}: ${errText.slice(0, 300)}`,
+      );
+      return null;
+    }
+
+    const data = await res.json();
+    const dashboardId = data?.data?.id ?? data?.id;
+    if (!dashboardId) {
+      console.warn(
+        "[SigNoz] Dashboard created but no id in response:",
+        JSON.stringify(data).slice(0, 300),
+      );
+      return null;
+    }
+
+    const url = `${baseUrl}/dashboard/${dashboardId}`;
+    dashboardUrlCache.set(cacheKey, url);
+    return url;
+  } catch (err) {
+    console.warn(
+      "[SigNoz] Dashboard creation errored, link omitted:",
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
 }
 
 export function getConfig(): { baseUrl: string; apiKey: string } {
@@ -666,6 +995,7 @@ export async function getRouteTelemetry(
     `[SigNoz] getRouteTelemetry(${service}, ${method}, ${routePath}) window=${windowLabel(start, end)}`,
   );
 
+  await ensureFieldKeysVerified();
   const routeFilter = buildRouteFilter(service, method, routePath);
   const escapedService = service.replace(/'/g, "\\'");
   const warnings: string[] = [];
@@ -693,7 +1023,7 @@ export async function getRouteTelemetry(
   const errorRaw = await runScalarTraceQuerySafe(
     start,
     end,
-    `${routeFilter} AND hasError = true`,
+    `${routeFilter} AND has_error = true`,
     errorAggregations,
     "error count",
     warnings,

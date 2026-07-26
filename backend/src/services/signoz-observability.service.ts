@@ -7,6 +7,7 @@ import {
   SEMCONV,
   DURATION_ATTRIBUTE,
   nanoToMs,
+  ensureFieldKeysVerified,
   type RouteTelemetry,
 } from "./signoz.service.js";
 import { TtlCache } from "./signozCache.service.js";
@@ -194,8 +195,6 @@ function dedupeRows(
   return out;
 }
 
-const METHOD_FIELD = SEMCONV.method; // "httpMethod" — same constant getRouteTelemetry filters on
-
 export async function getRecentTraces(
   serviceName: string,
   windowMinutes = 15,
@@ -204,6 +203,8 @@ export async function getRecentTraces(
   const cacheKey = `${serviceName}:traces:${windowMinutes}:${limit}`;
 
   return tracesCache.getOrFetch(cacheKey, async () => {
+    await ensureFieldKeysVerified();
+    const methodField = SEMCONV.method; // read live — may have just been corrected above
     const end = Date.now();
     const start = end - windowMinutes * 60 * 1000;
     const warnings: string[] = [];
@@ -216,10 +217,10 @@ export async function getRecentTraces(
       [
         "traceID",
         "spanID",
-        METHOD_FIELD,
+        methodField,
         ROUTE_ATTRIBUTE,
         DURATION_ATTRIBUTE,
-        "hasError",
+        "has_error",
         "timestamp",
       ],
       limit,
@@ -244,10 +245,10 @@ export async function getRecentTraces(
 
     const traces: TraceSummaryResult[] = rows.map((row) => ({
       traceId: String(row["traceID"] ?? ""),
-      method: String(row[METHOD_FIELD] ?? ""),
+      method: String(row[methodField] ?? ""),
       routePath: String(row[ROUTE_ATTRIBUTE] ?? ""),
       durationMs: nanoToMs(Number(row[DURATION_ATTRIBUTE] ?? 0)),
-      status: row["hasError"] === true ? "error" : "ok",
+      status: row["has_error"] === true ? "error" : "ok",
       timestamp: Number(row["timestamp"] ?? Date.now()),
     }));
 
@@ -263,6 +264,8 @@ export async function getRecentErrors(
   const cacheKey = `${serviceName}:errors:${windowMinutes}:${limit}`;
 
   return errorsCache.getOrFetch(cacheKey, async () => {
+    await ensureFieldKeysVerified();
+    const methodField = SEMCONV.method; // read live — may have just been corrected above
     const end = Date.now();
     const start = end - windowMinutes * 60 * 1000;
     const warnings: string[] = [];
@@ -271,11 +274,11 @@ export async function getRecentErrors(
     const raw = await runRawTraceQuerySafe(
       start,
       end,
-      `${SERVICE_ATTRIBUTE} = '${escapedService}' AND hasError = true`,
+      `${SERVICE_ATTRIBUTE} = '${escapedService}' AND has_error = true`,
       [
         "traceID",
         "spanID",
-        METHOD_FIELD,
+        methodField,
         ROUTE_ATTRIBUTE,
         "timestamp",
         "statusMessage",
@@ -310,7 +313,7 @@ export async function getRecentErrors(
       routePath: row[ROUTE_ATTRIBUTE]
         ? String(row[ROUTE_ATTRIBUTE])
         : undefined,
-      method: row[METHOD_FIELD] ? String(row[METHOD_FIELD]) : undefined,
+      method: row[methodField] ? String(row[methodField]) : undefined,
       stack: row["exception.stacktrace"]
         ? String(row["exception.stacktrace"])
         : undefined,

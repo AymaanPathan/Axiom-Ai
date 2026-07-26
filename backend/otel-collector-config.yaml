@@ -6,7 +6,7 @@
 receivers:
   docker_stats:
     endpoint: unix:///var/run/docker.sock
-    collection_interval: 5s # matches your PUSH_INTERVAL_MS in metrics-observer.service.ts
+    collection_interval: 20s # matches your PUSH_INTERVAL_MS in metrics-observer.service.ts
     metrics:
       container.cpu.utilization:
         enabled: true

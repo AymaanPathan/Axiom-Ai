@@ -1935,7 +1935,7 @@ function InspectorDrawer({
             />
             <LatencyPanel live={live} result={result} isLive={isLive} />
             <ThroughputPanel live={live} isLive={isLive} />
-            {/* <TelemetryPanel live={live} isLive={isLive} /> */}
+            <TelemetryPanel live={live} isLive={isLive} />
 
             <div className="flex items-center gap-1">
               <button
@@ -2731,14 +2731,27 @@ function TelemetryPanel({
         >
           <Database size={12} /> SigNoz{isLive && <LiveBadge />}
         </span>
-        {t && (
-          <span
-            className="text-[11px]"
-            style={{ fontFamily: MONO, color: TEXT_SECONDARY }}
-          >
-            p50 {t.latencyMs.p50}ms · p95 {t.latencyMs.p95}ms
-          </span>
-        )}
+        <div className="flex items-center gap-2.5">
+          {t?.dashboardUrl && (
+            <a
+              href={t.dashboardUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1 text-[10px] font-semibold"
+              style={{ color: YELLOW_DEEP }}
+            >
+              <ExternalLink size={10} /> Open
+            </a>
+          )}
+          {t && (
+            <span
+              className="text-[11px]"
+              style={{ fontFamily: MONO, color: TEXT_SECONDARY }}
+            >
+              p50 {t.latencyMs.p50}ms · p95 {t.latencyMs.p95}ms
+            </span>
+          )}
+        </div>
       </div>
       <div className="h-[64px]">
         {chartData.length > 1 ? (

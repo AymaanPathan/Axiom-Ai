@@ -120,9 +120,9 @@ export async function stopDockerRun(runId: string): Promise<boolean> {
 
   entry.manualStop = true;
   await new Promise<void>((resolve) => {
-    const kill = spawn("docker", ["kill", entry.containerName]);
-    kill.on("close", () => resolve());
-    kill.on("error", () => resolve()); // container may already be gone
+    const stop = spawn("docker", ["stop", "--time", "5", entry.containerName]);
+    stop.on("close", () => resolve());
+    stop.on("error", () => resolve()); // container may already be gone
   });
   return true;
 }
@@ -196,6 +196,8 @@ async function executeRun({
     ...envVars,
     OTEL_SERVICE_NAME: serviceName,
     OTEL_EXPORTER_OTLP_ENDPOINT: SIGNOZ_OTLP_ENDPOINT,
+    OTEL_BSP_SCHEDULE_DELAY: "250",
+    OTEL_BSP_MAX_EXPORT_BATCH_SIZE: "50",
     OTEL_LOG_LEVEL: "debug", // TEMP — remove once export path is confirmed working
   };
 

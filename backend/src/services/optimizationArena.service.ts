@@ -9,7 +9,11 @@ import { applyStrategyChanges } from "./codePatch.service.js";
 import { startDockerRun, stopDockerRun } from "../docker/docker-run.service.js";
 import { RunModel } from "../models/run.model.js";
 import { runLoadScript } from "./loadScriptRunner.service.js";
-import { getRouteTelemetry, RouteTelemetry } from "./signoz.service.js";
+import {
+  getOrCreateRouteDashboardUrl,
+  getRouteTelemetry,
+  RouteTelemetry,
+} from "./signoz.service.js";
 import { getIO } from "../config/socket.js";
 import type { LoadScriptResult } from "./loadScriptRunner.service.js";
 import type { OptimizationStrategy } from "./performanceAnalysis.service.js";
@@ -20,6 +24,63 @@ const HEALTHCHECK_INTERVAL_MS = 1800;
 const CONTAINER_BOOT_WAIT_MS = 2000;
 const METRICS_POLL_INTERVAL_MS = 1000;
 const TELEMETRY_POLL_INTERVAL_MS = 2500;
+
+// A SigNoz scalar query rejects start === end ("start time must be before
+// end time"). windowStart is captured with Date.now() and the live-poll
+// tick fires synchronously right after (see startLiveTelemetryPolling) —
+// millisecond-resolution clocks make it very common for both calls to
+// land in the same millisecond, especially on the very first tick. Every
+// telemetry window built in this file goes through this helper so that
+// invariant (end > start, by a real margin) can never be silently broken
+// again.
+const MIN_TELEMETRY_WINDOW_MS = 1000;
+function widenWindowEnd(start: number, end: number): number {
+  return Math.max(end, start + MIN_TELEMETRY_WINDOW_MS);
+}
+
+// Spans go through OTel's BatchSpanProcessor before being exported (see
+// OTEL_BSP_SCHEDULE_DELAY in docker-run.service.ts), then still need
+// collector ingest + SigNoz indexing before they're queryable. A fast
+// candidate benchmark can finish and have this function called before
+// that pipeline has caught up, which would otherwise report a spurious
+// requestCount=0 even though the run genuinely produced traffic. Retries
+// a few times with a short delay before accepting a zero result as real.
+const TELEMETRY_SETTLE_RETRIES = 3;
+const TELEMETRY_SETTLE_DELAY_MS = 800;
+async function getRouteTelemetryWithRetry(
+  serviceName: string,
+  method: string,
+  routePath: string,
+  start: number,
+  end: number,
+): Promise<RouteTelemetry> {
+  const widenedEnd = widenWindowEnd(start, end);
+  let last: RouteTelemetry = await getRouteTelemetry(
+    serviceName,
+    method,
+    routePath,
+    start,
+    widenedEnd,
+  );
+  for (
+    let attempt = 1;
+    attempt < TELEMETRY_SETTLE_RETRIES && last.requestCount === 0;
+    attempt++
+  ) {
+    await new Promise((r) => setTimeout(r, TELEMETRY_SETTLE_DELAY_MS));
+    // Re-widen against "now" too, in case very little time has passed —
+    // the ingest lag is what we're waiting out, not wall-clock coverage
+    // of the original window.
+    last = await getRouteTelemetry(
+      serviceName,
+      method,
+      routePath,
+      start,
+      widenWindowEnd(start, Date.now()),
+    );
+  }
+  return last;
+}
 
 export type ArenaStage =
   | "queued"
@@ -142,11 +203,49 @@ async function prewarmNodeModules(
   });
 }
 
-function retargetScriptPort(script: string, port: number): string {
-  return script.replace(
-    /const BASE_URL\s*=\s*["'`]http:\/\/localhost:\d+["'`]/,
-    `const BASE_URL = "http://localhost:${port}"`,
-  );
+const LOCALHOST_URL_PATTERN = /http:\/\/localhost:\d+/g;
+
+function retargetScriptPort(
+  script: string,
+  port: number,
+): { script: string; replacements: number } {
+  let replacements = 0;
+  const retargeted = script.replace(LOCALHOST_URL_PATTERN, () => {
+    replacements++;
+    return `http://localhost:${port}`;
+  });
+  return { script: retargeted, replacements };
+}
+
+// Re-checks a strategy's file-existence assumptions against what's
+// ACTUALLY on disk in this candidate's freshly-copied isolatedPath, right
+// before patching. Strategy plans are validated once against
+// existingFilePaths/knownFilePaths at generate-strategies time, but that
+// snapshot can go stale by the time a candidate actually runs — most
+// commonly because a successful /apply-fix-and-retest call (which patches
+// repository.localPath permanently and does NOT revert on success) added
+// a file the strategy's "create" targets, after the strategy was already
+// generated and handed to the arena.
+//
+// Without this check, applyStrategyChanges' createNewFile guard still
+// catches the collision — that safety net was never broken — but it
+// surfaces as a bare "Cannot create X — a file already exists" with no
+// indication of WHY, several pipeline stages after the plan was made.
+// This gives the same protection with an actionable message instead.
+async function findStaleCreateTargets(
+  isolatedPath: string,
+  strategy: OptimizationStrategy,
+): Promise<string[]> {
+  const stale: string[] = [];
+  for (const change of strategy.changes) {
+    if (change.changeType !== "create") continue;
+    const exists = await fs
+      .access(path.join(isolatedPath, change.filePath))
+      .then(() => true)
+      .catch(() => false);
+    if (exists) stale.push(change.filePath);
+  }
+  return stale;
 }
 
 // FIXED: previously used a bare setInterval, which only fires AFTER the
@@ -218,6 +317,12 @@ async function runOneCandidate(opts: {
   let runId: string | null = null;
   let stopMetricsPolling: (() => void) | null = null;
 
+  const metricsHistory: {
+    cpuPercent: number;
+    memoryMB: number;
+    timestamp: number;
+  }[] = [];
+
   const fail = (error: string): ArenaCandidateResult => {
     emitCandidateStatus(arenaId, strategy.id, "failed", { error });
     return {
@@ -228,11 +333,6 @@ async function runOneCandidate(opts: {
       metricsHistory,
     };
   };
-  const metricsHistory: {
-    cpuPercent: number;
-    memoryMB: number;
-    timestamp: number;
-  }[] = [];
 
   try {
     emitCandidateStatus(arenaId, strategy.id, "copying");
@@ -240,6 +340,13 @@ async function runOneCandidate(opts: {
     await fs.cp(opts.sourceLocalPath, isolatedPath, { recursive: true });
 
     emitCandidateStatus(arenaId, strategy.id, "patching");
+
+    const staleCreates = await findStaleCreateTargets(isolatedPath, strategy);
+    if (staleCreates.length > 0) {
+      return fail(
+        `This strategy's plan is stale: ${staleCreates.join(", ")} already exist${staleCreates.length === 1 ? "s" : ""} in the repository now, even though ${staleCreates.length === 1 ? "it" : "they"} didn't when this strategy was generated (most likely a fix was applied to the repo since then). Regenerate strategies and retry.`,
+      );
+    }
 
     const patch = await applyStrategyChanges(isolatedPath, strategy.changes);
     if (!patch.applied) {
@@ -286,7 +393,25 @@ async function runOneCandidate(opts: {
       opts.routePath,
       Date.now(),
     );
-    const retargeted = retargetScriptPort(opts.script, hostPort);
+    const { script: retargeted, replacements } = retargetScriptPort(
+      opts.script,
+      hostPort,
+    );
+    if (replacements === 0) {
+      stopMetricsPolling();
+      stopMetricsPolling = null;
+      stopTelemetryPolling();
+      return fail(
+        `Load script for "${strategy.title}" contains no "http://localhost:<port>" URL to retarget — ` +
+          `the benchmark would have run against whatever port was hard-coded into the generated script, ` +
+          `not this candidate's actual container (port ${hostPort}). Failing loudly instead of silently ` +
+          `benchmarking nothing. Check the load-script generation prompt/template for how it builds its base URL.`,
+      );
+    }
+    console.log(
+      `[Arena ${strategy.id}] retargetScriptPort: rewrote ${replacements} localhost URL(s) → port ${hostPort}`,
+    );
+
     const runResult = await runLoadScript({
       repositoryId: opts.repositoryId,
       script: retargeted,
@@ -304,12 +429,27 @@ async function runOneCandidate(opts: {
     emitCandidateStatus(arenaId, strategy.id, "telemetry", { runId });
     let telemetry: RouteTelemetry | null = null;
     try {
-      telemetry = await getRouteTelemetry(
+      // Uses the settle/retry wrapper (not getRouteTelemetry directly):
+      // this call runs immediately after the load test finishes, and
+      // spans emitted right up to the end of the run may not have
+      // cleared OTel's BatchSpanProcessor + collector ingest + SigNoz
+      // indexing yet. Querying too early here would report a spurious
+      // requestCount=0 for a candidate that genuinely handled traffic.
+      // widenWindowEnd() inside the wrapper also guards against
+      // runResult.windowStart/windowEnd ever collapsing to a zero-width
+      // window, which SigNoz's API rejects outright (400: "start time
+      // must be before end time").
+      telemetry = await getRouteTelemetryWithRetry(
         serviceName,
         opts.method,
         opts.routePath,
         runResult.windowStart,
         runResult.windowEnd,
+      );
+      telemetry.dashboardUrl = await getOrCreateRouteDashboardUrl(
+        serviceName,
+        opts.method,
+        opts.routePath,
       );
     } catch (err) {
       console.error(`[Arena ${strategy.id}] telemetry fetch failed:`, err);
@@ -648,11 +788,22 @@ async function getDockerStatsFallback(
   });
 }
 
-// FIXED: same immediate-sample issue as startLiveMetricsPolling above —
-// previously used a bare setInterval(..., 2500ms), so a benchmark that
-// finished inside 2.5s never got a single telemetry emit and the arena
-// UI's SigNoz panel sat on "Waiting for spans…" for the entire run even
-// once spans were actually being exported. Now fires once immediately.
+// FIXED (immediate-sample): same fast-benchmark issue as
+// startLiveMetricsPolling above — previously used a bare
+// setInterval(..., 2500ms), so a benchmark that finished inside 2.5s
+// never got a single telemetry emit and the arena UI's SigNoz panel sat
+// on "Waiting for spans…" for the entire run even once spans were
+// actually being exported. Fires once immediately, then on the normal
+// interval.
+//
+// FIXED (zero-width window): the immediate `void tick()` call fires in
+// the same synchronous tick as the `windowStart = Date.now()` capture at
+// the call site below — millisecond-resolution clocks make it common for
+// `windowStart` and the `Date.now()` used as `end` inside tick() to be
+// bit-identical. SigNoz's API hard-rejects start === end with a 400
+// ("start time must be before end time"), which is exactly what showed
+// up in the logs for every arena candidate's first poll. widenWindowEnd()
+// guarantees the window is always at least MIN_TELEMETRY_WINDOW_MS wide.
 function startLiveTelemetryPolling(
   arenaId: string,
   strategyId: string,
@@ -671,7 +822,12 @@ function startLiveTelemetryPolling(
         method,
         routePath,
         windowStart,
-        Date.now(),
+        widenWindowEnd(windowStart, Date.now()),
+      );
+      t.dashboardUrl = await getOrCreateRouteDashboardUrl(
+        serviceName,
+        method,
+        routePath,
       );
       if (!stopped) {
         emitArena(arenaId, "arena:candidate:telemetry", {

@@ -4,6 +4,7 @@ import {
   buildDisplayDiff,
   buildCreateDisplayDiff,
 } from "./codePatch.service.js";
+import ts from "typescript";
 
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 const GROQ_MODEL = "llama-3.3-70b-versatile";
@@ -247,6 +248,177 @@ function extractImportedPackages(code: string): string[] {
     }
   }
   return [...specifiers];
+}
+
+// --- new: cross-file export/import consistency check ---------------------
+//
+// Catches the "renamed getOrdersByUser -> getOrdersByUserWithPagination in
+// the service but never touched the controller's import" class of bug.
+// Regex-based on purpose — codeContext is a plain concatenated blob, not an
+// AST, and this only needs to be a reasonable heuristic since a false
+// positive just costs one extra regenerate attempt.
+
+const EXPORT_NAME_PATTERN =
+  /export\s+(?:default\s+)?(?:async\s+)?(?:function|const|class|let|var)\s+([A-Za-z0-9_$]+)/g;
+const EXPORT_BRACE_PATTERN = /export\s*\{\s*([^}]+)\s*\}/g;
+
+function extractExportedNames(code: string): Set<string> {
+  const names = new Set<string>();
+  for (const pattern of [EXPORT_NAME_PATTERN, EXPORT_BRACE_PATTERN]) {
+    pattern.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(code)) !== null) {
+      if (pattern === EXPORT_BRACE_PATTERN) {
+        for (const raw of match[1].split(",")) {
+          const name = raw
+            .trim()
+            .split(/\s+as\s+/)[0]
+            .trim();
+          if (name) names.add(name);
+        }
+      } else {
+        names.add(match[1]);
+      }
+    }
+  }
+  return names;
+}
+
+// Splits the aggregated codeContext blob back into per-file content, using
+// the same "// {path} ({role})" header that resolveConnectedFiles' consumers
+// (explain.service.ts, the strategies prompt itself) already write for each
+// file when they build codeContext.
+function splitCodeContextByFile(codeContext: string): Map<string, string> {
+  const map = new Map<string, string>();
+  const parts = codeContext.split(/^\/\/ (.+?) \(.+?\)$/m);
+  for (let i = 1; i < parts.length; i += 2) {
+    const filePath = parts[i].trim();
+    const content = parts[i + 1] ?? "";
+    map.set(filePath, content);
+  }
+  return map;
+}
+
+// Rejects a strategy that renames/removes an export another file in this
+// same code context still references, unless that other file also has a
+// change in this same strategy updating it.
+function findBrokenExportReferences(
+  changes: RawFileChange[],
+  codeContext: string,
+): string[] {
+  const problems: string[] = [];
+  const fileMap = splitCodeContextByFile(codeContext);
+  const changedPaths = new Set(changes.map((c) => c.filePath));
+
+  for (const change of changes) {
+    if (
+      change.changeType === "create" ||
+      !change.originalCode ||
+      !change.newCode
+    )
+      continue;
+    const before = extractExportedNames(change.originalCode);
+    const after = extractExportedNames(change.newCode);
+    const dropped = [...before].filter((n) => !after.has(n));
+    if (dropped.length === 0) continue;
+
+    for (const [otherPath, otherContent] of fileMap) {
+      if (otherPath === change.filePath || changedPaths.has(otherPath))
+        continue;
+      for (const name of dropped) {
+        if (new RegExp(`\\b${name}\\b`).test(otherContent)) {
+          problems.push(
+            `"${change.filePath}" removed/renamed export "${name}", but "${otherPath}" still references it and has no change updating it.`,
+          );
+        }
+      }
+    }
+  }
+  return problems;
+}
+
+// --- new: syntax-only pre-check -------------------------------------------
+//
+// Catches "this doesn't even parse/bind" (stray `return`, mismatched
+// braces, top-level `await` under the wrong module target) BEFORE a
+// strategy is ever accepted, instead of discovering it when the container
+// crashes on boot.
+//
+// NOTE: this deliberately does NOT use ts.transpileModule. transpileModule
+// only runs the parser, not the binder — and TS1108 ("return outside a
+// function") and TS1378 ("top-level await") are both binder-level checks,
+// so transpileModule silently misses exactly the two bugs from the last
+// failed run that this exists to catch. A real (single-file) ts.Program is
+// required to get those diagnostics at all.
+//
+// This only checks a single file in isolation — no other repo files, no
+// real lib.d.ts, no module resolution — so it intentionally ignores
+// name/type/module-resolution diagnostics (undefined identifiers, missing
+// imports, etc: expected here, and already handled by
+// findBrokenExportReferences + the "known dependency" check above) and
+// only surfaces the small set of structural parse/bind codes below.
+const STRUCTURAL_DIAGNOSTIC_CODES = new Set([
+  1002, // Unterminated string literal
+  1003, // Identifier expected
+  1005, // 'x' expected (mismatched braces/parens/etc.)
+  1009, // Trailing comma not allowed
+  1068, // Unexpected token
+  1108, // A 'return' statement can only be used within a function body
+  1109, // Expression expected
+  1128, // Declaration or statement expected
+  1136, // Property assignment expected
+  1160, // Unterminated template literal
+  1161, // Unterminated regular expression literal
+  1375, // 'await' only allowed at top level of a module
+  1378, // Top-level 'await' only allowed for es2022+/target es2017+
+  1434, // Unexpected keyword or identifier
+]);
+
+function findSyntaxErrors(fileContent: string): string[] {
+  const virtualFileName = "strategy-check.ts";
+  const compilerOptions: ts.CompilerOptions = {
+    target: ts.ScriptTarget.ES2020,
+    module: ts.ModuleKind.CommonJS,
+    noResolve: true,
+    isolatedModules: true,
+    noEmit: true,
+    skipLibCheck: true,
+    noLib: true,
+    types: [],
+  };
+
+  const host = ts.createCompilerHost(compilerOptions);
+  const originalGetSourceFile = host.getSourceFile;
+  host.getSourceFile = (name, ...rest) =>
+    name === virtualFileName
+      ? ts.createSourceFile(
+          virtualFileName,
+          fileContent,
+          compilerOptions.target ?? ts.ScriptTarget.ES2020,
+          true,
+          ts.ScriptKind.TS,
+        )
+      : originalGetSourceFile.call(host, name, ...rest);
+  host.readFile = (name) =>
+    name === virtualFileName ? fileContent : undefined;
+  host.fileExists = (name) => name === virtualFileName;
+
+  const program = ts.createProgram([virtualFileName], compilerOptions, host);
+  const diagnostics = [
+    ...program.getSyntacticDiagnostics(),
+    ...program.getSemanticDiagnostics(),
+  ];
+
+  return diagnostics
+    .filter(
+      (d) =>
+        d.category === ts.DiagnosticCategory.Error &&
+        STRUCTURAL_DIAGNOSTIC_CODES.has(d.code),
+    )
+    .map(
+      (d) =>
+        `TS${d.code}: ${ts.flattenDiagnosticMessageText(d.messageText, " ")}`,
+    );
 }
 
 // Heuristic: flags an in-memory cache/store (Map/Set) declared inside a
@@ -627,6 +799,10 @@ Rules:
 6. Never call sequential awaits "concurrent". Never claim a loop/N+1 exists unless structural evidence confirms it.
 7. Strategies must be meaningfully different — not the same patch reworded, and not a repeat of an already-accepted strategy above.
 8. Obey the HARD RULE, HARD SCOPE RULE, CACHING RULE, and REDIS FILE-SPLIT RULE above exactly — a violation gets the whole strategy discarded.
+9. If you rename, remove, or change the signature of any exported function/const/class, you MUST include a
+   "modify" change for EVERY other file shown in SOURCE that imports or calls it, updating both the import
+   statement and every call site to match. Renaming an export without updating its callers elsewhere makes
+   the whole strategy invalid and it will be discarded.
 
 ${
   structural.found
@@ -791,6 +967,22 @@ function validateAndBuildStrategy(
         );
         return null;
       }
+
+      // Syntax pre-check: splice into the whole reconstructed file (not
+      // just the snippet — a lone snippet often won't parse standalone
+      // even when correctly embedded) and check it actually parses.
+      const fileMapForSyntax = splitCodeContextByFile(opts.codeContext);
+      const wholeFileAfter = (
+        fileMapForSyntax.get(rc.filePath) ?? opts.codeContext
+      ).replace(rc.originalCode, rc.newCode);
+      const syntaxErrors = findSyntaxErrors(wholeFileAfter);
+      if (syntaxErrors.length > 0) {
+        rejectedNotes.push(
+          `"${label}"'s change to "${rc.filePath}" doesn't parse: ${syntaxErrors[0]}`,
+        );
+        return null;
+      }
+
       builtChanges.push({
         filePath: rc.filePath,
         changeType: "modify",
@@ -811,6 +1003,15 @@ function validateAndBuildStrategy(
         );
         return null;
       }
+
+      const createSyntaxErrors = findSyntaxErrors(rc.newCode);
+      if (createSyntaxErrors.length > 0) {
+        rejectedNotes.push(
+          `"${label}"'s new file "${rc.filePath}" doesn't parse: ${createSyntaxErrors[0]}`,
+        );
+        return null;
+      }
+
       builtChanges.push({
         filePath: rc.filePath,
         changeType: "create",
@@ -818,6 +1019,14 @@ function validateAndBuildStrategy(
         unifiedDiff: buildCreateDisplayDiff(rc.filePath, rc.newCode),
       });
     }
+  }
+
+  // Cross-file check runs once all of this strategy's changes are known —
+  // a rename is only "broken" relative to the full set of files it touched.
+  const brokenRefs = findBrokenExportReferences(raw.changes, opts.codeContext);
+  if (brokenRefs.length > 0) {
+    rejectedNotes.push(`"${label}": ${brokenRefs.join(" ")}`);
+    return null;
   }
 
   const confidence: "high" | "medium" | "low" =

@@ -8,6 +8,7 @@ import {
   SERVICE_ATTRIBUTE,
   DURATION_ATTRIBUTE,
   nanoToMs,
+  ensureFieldKeysVerified,
 } from "./signoz.service.js";
 
 export type ContainerMetricsSource = "signoz" | "unavailable";
@@ -125,6 +126,7 @@ async function getServiceAggregate(
   p95Ms: number;
   p99Ms: number;
 }> {
+  await ensureFieldKeysVerified();
   const end = Date.now();
   const start = end - windowMs;
   const warnings: string[] = [];
@@ -151,7 +153,7 @@ async function getServiceAggregate(
   const errorRaw = await runScalarTraceQuerySafe(
     start,
     end,
-    `${filter} AND hasError = true`,
+    `${filter} AND has_error = true`,
     errorAggregations,
     "service aggregate error count",
     warnings,
