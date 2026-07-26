@@ -1,4 +1,5 @@
 # ⚡ Axiom AI
+<img width="5736" height="2596" alt="Image" src="https://github.com/user-attachments/assets/824c16c3-4096-4ba3-b84d-c15a6f7f8e6c" />
 
 **Axiom improves your backend for you. Give it a scenario, and it benchmarks your API, diagnoses the bottleneck, generates competing fixes, battle tests them, and opens the pull request for the winner.**
 
@@ -71,15 +72,20 @@ GitHub OAuth gets your access token. `GET /repos` lists everything you can see; 
 You fill in the env vars Axiom detected are missing. `POST /repos/:id/run` starts a Docker container (`--rm`, isolated) running your actual app, with your actual env vars, decrypted just in time. Every run is tracked in Mongo (`RunModel`) so status survives page reloads and even backend restarts.
 
 ### 4. Repo Detail
+<img width="3840" height="2160" alt="Image" src="https://github.com/user-attachments/assets/d8cdcc1f-371e-498f-b3d5-996662d840ed" />
+
 Pulls together:
 - `GET /repos/:id/routes`, the parsed route table
 - `GET /repos/:id/observability/health` and `/observability/system`, telling you if the container is up, if Mongo is connected, and if the run is "healthy" or "degraded" (driven by a live error rate threshold against SigNoz data)
 - A `metrics observer` background loop that pushes a CPU/memory/latency snapshot over a socket every 5 seconds, straight from SigNoz's container metrics, never a locally guessed number
 
 ### 5. Endpoints Page
+<img width="3840" height="2160" alt="Image" src="https://github.com/user-attachments/assets/d5516c95-1df7-41a5-a86a-f8dc5313f9da" />
+
 `GET /repos/:id/observability/endpoints` fans out to SigNoz for every discovered route **concurrently** (capped at 4 in flight, with one retry on transient failure, since SigNoz's `query_range` path has known intermittent issues under its own internal parallelism, so a single flaky call doesn't drop a route from the table). Results are cached with a short TTL so repeat panel mounts don't re hammer SigNoz.
 
 ### 6. API Workspace, the heaviest page
+<img width="3840" height="2160" alt="Image" src="https://github.com/user-attachments/assets/a1e9273e-ca36-4d53-9a3b-8b876ca9802d" />
 This is where most of the real engineering lives:
 
 - **Connected Files** (`GET /repos/:id/connected-files`): walks from the route's registration line into its controller and one hop further (service/model) via the file's own relative imports. Real code from the real repo, not a synthetic stub.
@@ -91,6 +97,8 @@ This is where most of the real engineering lives:
 - **Generate Strategies** (`POST /repos/:id/generate-strategies`): given the same evidence, asks for **three independent, meaningfully different** fixes (not three variations of the same idea), each with its own diff, confidence level, and estimated improvement range.
 
 ### 7. Arena, the showcase page
+<img width="3072" height="1724" alt="Image" src="https://github.com/user-attachments/assets/4b6f9118-4636-4c4e-a146-5225ba11c5c4" />
+
 `POST /repos/:id/init-arena` provisions a shared, isolated sandbox. Then, for each of the three strategies:
 1. **Isolate**, copy the repo into its own workspace
 2. **Patch**, apply that strategy's diff
