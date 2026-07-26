@@ -20,7 +20,7 @@ Axiom does all of that for you, end to end, and grounds every number it shows yo
 
 ---
 
-## 🎬 How it works, in one story
+## 🎬 How it works, in one story [video demo link : https://www.youtube.com/watch?v=p9uAbXeAaiw]
 
 > You connect your GitHub repo. Axiom clones it, detects it's Express, and maps every route straight to its file and line.
 >
@@ -84,7 +84,7 @@ Pulls together:
 
 `GET /repos/:id/observability/endpoints` fans out to SigNoz for every discovered route **concurrently** (capped at 4 in flight, with one retry on transient failure, since SigNoz's `query_range` path has known intermittent issues under its own internal parallelism, so a single flaky call doesn't drop a route from the table). Results are cached with a short TTL so repeat panel mounts don't re hammer SigNoz.
 
-### 6. API Workspace, the heaviest page
+### 6. API Workspace
 <img width="3840" height="2160" alt="Image" src="https://github.com/user-attachments/assets/a1e9273e-ca36-4d53-9a3b-8b876ca9802d" />
 This is where most of the real engineering lives:
 
