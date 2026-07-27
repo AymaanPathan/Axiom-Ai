@@ -20,7 +20,7 @@ Axiom does all of that for you, end to end, and grounds every number it shows yo
 
 ---
 
-## 🎬 How it works, in one story [https://www.youtube.com/watch?v=p9uAbXeAaiw]
+## 🎬 How it works, in one story [https://drive.google.com/file/d/1VOkvsFcbzgtdPndeGhm7sJdWSLT4lSGq/view?usp=sharing]
 
 > You connect your GitHub repo. Axiom clones it, detects it's Express, and maps every route straight to its file and line.
 >
