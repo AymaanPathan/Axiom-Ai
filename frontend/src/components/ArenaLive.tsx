@@ -2732,17 +2732,15 @@ function TelemetryPanel({
           <Database size={12} /> SigNoz{isLive && <LiveBadge />}
         </span>
         <div className="flex items-center gap-2.5">
-          {t?.dashboardUrl && (
-            <a
-              href={t.dashboardUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center gap-1 text-[10px] font-semibold"
-              style={{ color: YELLOW_DEEP }}
-            >
-              <ExternalLink size={10} /> Open
-            </a>
-          )}
+          <a
+            href="http://localhost:8080/dashboard"
+            target="_blank"
+            rel="noreferrer"
+            className="flex items-center gap-1 text-[10px] font-semibold"
+            style={{ color: YELLOW_DEEP }}
+          >
+            <ExternalLink size={10} /> Open
+          </a>
           {t && (
             <span
               className="text-[11px]"
