@@ -429,18 +429,30 @@ export async function runScalarTraceQuery(
   debugLog("--> aggregations:", JSON.stringify(aggregations));
   console.log("[SigNoz] scalar query -->", filterExpression);
 
+  // NOTE: res.text() is read INSIDE the enqueued callback, not after it.
+  // enqueueSignozCall only serializes the promise it's given — if that
+  // promise resolves as soon as fetch()'s headers arrive (the old
+  // behavior), the queue advances to the next call while THIS response's
+  // body is still being drained by ClickHouse on the SigNoz side. That gap
+  // is exactly the "overlapping/canceled query_range requests" condition
+  // signoz#11509 describes. Reading the body inside the queued function
+  // means the queue doesn't move on until this call is fully finished,
+  // headers AND body — a real serialization, not just a serialized kickoff.
   let res: Response;
+  let rawText: string;
   try {
-    res = await enqueueSignozCall(() =>
-      fetch(`${baseUrl}/api/v5/query_range`, {
+    ({ res, rawText } = await enqueueSignozCall(async () => {
+      const r = await fetch(`${baseUrl}/api/v5/query_range`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "SIGNOZ-API-KEY": apiKey,
         },
         body: JSON.stringify(body),
-      }),
-    );
+      });
+      const text = await r.text();
+      return { res: r, rawText: text };
+    }));
   } catch (networkErr) {
     console.error(
       "[SigNoz] NETWORK ERROR calling query_range (scalar):",
@@ -448,8 +460,6 @@ export async function runScalarTraceQuery(
     );
     throw networkErr;
   }
-
-  const rawText = await res.text();
 
   if (!res.ok) {
     console.error(
@@ -522,18 +532,24 @@ export async function runRawTraceQuery(
     limit,
   );
 
+  // See runScalarTraceQuery above — body read moved inside the queued
+  // callback so the queue doesn't advance until this response is fully
+  // drained, not just headers-received.
   let res: Response;
+  let rawText: string;
   try {
-    res = await enqueueSignozCall(() =>
-      fetch(`${baseUrl}/api/v5/query_range`, {
+    ({ res, rawText } = await enqueueSignozCall(async () => {
+      const r = await fetch(`${baseUrl}/api/v5/query_range`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "SIGNOZ-API-KEY": apiKey,
         },
         body: JSON.stringify(body),
-      }),
-    );
+      });
+      const text = await r.text();
+      return { res: r, rawText: text };
+    }));
   } catch (networkErr) {
     console.error(
       "[SigNoz] NETWORK ERROR calling query_range (raw):",
@@ -541,8 +557,6 @@ export async function runRawTraceQuery(
     );
     throw networkErr;
   }
-
-  const rawText = await res.text();
 
   if (!res.ok) {
     console.error(
@@ -1169,18 +1183,24 @@ export async function runScalarMetricQuery(
     filterExpression,
   );
 
+  // See runScalarTraceQuery above — body read moved inside the queued
+  // callback so the queue doesn't advance until this response is fully
+  // drained, not just headers-received.
   let res: Response;
+  let rawText: string;
   try {
-    res = await enqueueSignozCall(() =>
-      fetch(`${baseUrl}/api/v5/query_range`, {
+    ({ res, rawText } = await enqueueSignozCall(async () => {
+      const r = await fetch(`${baseUrl}/api/v5/query_range`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "SIGNOZ-API-KEY": apiKey,
         },
         body: JSON.stringify(body),
-      }),
-    );
+      });
+      const text = await r.text();
+      return { res: r, rawText: text };
+    }));
   } catch (networkErr) {
     console.error(
       "[SigNoz] NETWORK ERROR calling query_range (metric scalar):",
@@ -1188,8 +1208,6 @@ export async function runScalarMetricQuery(
     );
     throw networkErr;
   }
-
-  const rawText = await res.text();
 
   if (!res.ok) {
     console.error(

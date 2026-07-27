@@ -13,12 +13,23 @@ const explanationCache = new Map<string, string>();
 
 const MAX_AGENT_TURNS = 4; // hard ceiling so a confused model can't loop forever / burn the free tier
 
+// Same guard as loadScriptGenerator.service.ts / performanceAnalysis.service.ts
+// — without it, a route with a long controller->service chain sends the full
+// concatenated codeContext to Groq and blows past the free tier's 12000 TPM
+// limit (413 Request too large). This is on top of, not instead of, keeping
+// MAX_AGENT_TURNS low — a truncated-but-still-large context can still add up
+// across a multi-turn tool-calling loop.
+const MAX_CODE_CONTEXT_CHARS = 6000;
+
 // --- MCP tool schema -> Groq/OpenAI function-calling schema ---------------
 // Groq's tool-calling format is OpenAI-compatible. MCP's tools/list already
 // gives us {name, description, inputSchema} — inputSchema IS a JSON Schema
 // object, so this is a rename, not a translation.
 async function getGroqToolsFromMcp(): Promise<
-  { type: "function"; function: { name: string; description?: string; parameters: unknown } }[]
+  {
+    type: "function";
+    function: { name: string; description?: string; parameters: unknown };
+  }[]
 > {
   try {
     const tools: McpTool[] = await listSignozMcpTools();
@@ -113,9 +124,13 @@ async function runExplainAgent(
 
   const userPrompt = `You're explaining what a backend API endpoint is FOR to someone non-technical — a product manager, a founder, a new hire — not a developer reading the code. They don't care about functions, files, variables, or syntax. They want to know what real-world thing this powers.
 
-Here is the code behind the endpoint, for your own understanding only — do not describe it, quote it, or mention file names, function names, or code structure in your answer:
+Here is the code behind the endpoint, for your own understanding only — do not describe it, quote it, or mention file names, function names, or code structure in your answer${
+    codeContext.length > MAX_CODE_CONTEXT_CHARS
+      ? " (truncated — treat it as a representative excerpt, not the complete implementation)"
+      : ""
+  }:
 
-${codeContext}
+${codeContext.slice(0, MAX_CODE_CONTEXT_CHARS)}
 
 ${requestBodyFields.length > 0 ? `The data it works with includes: ${requestBodyFields.join(", ")}` : ""}
 

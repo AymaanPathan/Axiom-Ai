@@ -501,6 +501,25 @@ function cleanJson(raw: string): string {
     .trim();
 }
 
+// Renders the best-effort SigNoz-MCP live-traffic narrative (see
+// tryGetMcpContext in routes.ts / getRouteTelemetryViaMcp in
+// signozMcp.service.ts) as its own labeled section in a prompt. Kept as a
+// single shared helper since both prompt builders below need the exact
+// same framing: this is REAL, currently-happening traffic on the service,
+// separate from and not to be confused with the synthetic load-test
+// numbers in MEASURED METRICS above it.
+function renderMcpSection(mcpContext: string | undefined): string {
+  if (!mcpContext) return "";
+  return `
+LIVE TRAFFIC CONTEXT (via SigNoz MCP — real production/dev traffic, NOT the synthetic load test above):
+${mcpContext}
+
+Use this only as supporting context for how "hot" this route actually is outside the load test (e.g. does real
+traffic already show elevated latency/errors on this route). Do NOT treat it as a second load-test result and do
+NOT average it with the MEASURED METRICS above — they're different traffic sources over different windows.
+`;
+}
+
 // ---------------------------------------------------------------------------
 // analyzeLoadTestPerformance — single-fix flow, unchanged (still one file).
 // ---------------------------------------------------------------------------
@@ -509,6 +528,7 @@ function buildPrompt(
   metrics: ComputedMetrics,
   codeContext: string,
   structural: StructuralFinding,
+  mcpContext: string | undefined,
 ): string {
   return `You are a senior performance engineer reviewing a load test. Respond with ONLY raw JSON matching this exact TypeScript shape — no markdown fences, no prose outside the JSON:
 
@@ -541,7 +561,7 @@ MEASURED METRICS (ground truth — do not contradict or recompute these, just ci
 - External/API calls per request: ${metrics.externalSpansPerRequest ?? "not available"}
 - % of request time in external calls: ${metrics.externalTimeSharePercent !== null ? `${metrics.externalTimeSharePercent}%` : "not available"}
 - MAX DEFENSIBLE IMPROVEMENT ESTIMATE: your estimatedImprovementPercent.max MUST NOT exceed ${estimateCeiling(metrics, structural)}%.
-
+${renderMcpSection(mcpContext)}
 STRUCTURAL CODE EVIDENCE:
 ${
   structural.found
@@ -558,7 +578,7 @@ Rules:
 3. Statistical evidence supports scale/impact, not existence of a pattern.
 4. If DB spans/request is close to 1, look for missing indexes/oversized payloads/unbounded queries instead.
 5. If external-call time dominates, the fix is caching/parallelizing/timeout tuning on that call.
-6. Evidence bullets must each cite a real number above or the structural finding.
+6. Evidence bullets must each cite a real number above, the structural finding, or (if present) the live traffic context — never an invented figure.
 7. "originalCode" must be an exact, verbatim, UNIQUE substring of the source shown above.
 8. estimatedImprovementPercent must stay within the MAX DEFENSIBLE IMPROVEMENT ESTIMATE.
 `;
@@ -571,6 +591,7 @@ export async function analyzeLoadTestPerformance(opts: {
   codeContext: string;
   dbBreakdown?: DbOperationBreakdown[];
   knownFilePaths?: string[];
+  mcpContext?: string;
 }): Promise<PerformanceReport> {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) throw new Error("GROQ_API_KEY is not configured on the server.");
@@ -590,7 +611,7 @@ export async function analyzeLoadTestPerformance(opts: {
         {
           role: "system",
           content:
-            "You are a senior performance engineer. You only cite numbers you were given, never invent metrics, never call sequential await calls 'concurrent', never assert a loop/N+1 pattern exists unless the structural evidence confirms it, and every diff you produce is a real, minimal patch against the exact code shown. Respond with raw JSON only.",
+            "You are a senior performance engineer. You only cite numbers you were given, never invent metrics, never call sequential await calls 'concurrent', never assert a loop/N+1 pattern exists unless the structural evidence confirms it, and every diff you produce is a real, minimal patch against the exact code shown. When live traffic context (via SigNoz MCP) is provided, treat it as real supporting evidence about production behavior, distinct from the synthetic load test. Respond with raw JSON only.",
         },
         {
           role: "user",
@@ -599,6 +620,7 @@ export async function analyzeLoadTestPerformance(opts: {
             computed,
             opts.codeContext,
             structural,
+            opts.mcpContext,
           ),
         },
       ],
@@ -664,6 +686,7 @@ function buildStrategiesPrompt(
   existingFilePaths: string[],
   knownDependencies: string[],
   knownEnvVars: string[],
+  mcpContext: string | undefined,
   feedback: {
     count: number;
     alreadyAccepted: { title: string; approach: string }[];
@@ -803,6 +826,8 @@ Rules:
    "modify" change for EVERY other file shown in SOURCE that imports or calls it, updating both the import
    statement and every call site to match. Renaming an export without updating its callers elsewhere makes
    the whole strategy invalid and it will be discarded.
+10. If LIVE TRAFFIC CONTEXT is present below, you may use it to judge urgency/priority ordering across
+    strategies, but it is not a source of new metrics — never cite it as if it were a MEASURED METRIC.
 
 ${
   structural.found
@@ -816,7 +841,7 @@ MEASURED METRICS:
 - Avg latency: ${metrics.avgMs.toFixed(0)}ms, P95: ${metrics.p95Ms ?? "n/a"}ms
 - DB spans/request: ${metrics.dbSpansPerRequest ?? "n/a"}, DB time share: ${metrics.dbTimeSharePercent ?? "n/a"}%
 - External calls/request: ${metrics.externalSpansPerRequest ?? "n/a"}, share: ${metrics.externalTimeSharePercent ?? "n/a"}%
-
+${renderMcpSection(mcpContext)}
 SOURCE:
 ${codeContext.slice(0, MAX_CODE_CONTEXT_CHARS)}
 `;
@@ -1068,7 +1093,7 @@ async function callGroqForStrategies(
         {
           role: "system",
           content:
-            "You are a senior performance engineer proposing multiple distinct, real fixes across one or more files, including new files when genuinely useful. You never invent metrics, never mislabel sequential code as concurrent, and every change is a real, minimal, applicable patch against the exact code shown — unique within it. When a fix needs Redis, you always isolate client/connection setup into its own created file rather than inlining it. Respond with raw JSON only.",
+            "You are a senior performance engineer proposing multiple distinct, real fixes across one or more files, including new files when genuinely useful. You never invent metrics, never mislabel sequential code as concurrent, and every change is a real, minimal, applicable patch against the exact code shown — unique within it. When a fix needs Redis, you always isolate client/connection setup into its own created file rather than inlining it. When live traffic context (via SigNoz MCP) is provided, use it only to judge urgency/priority — never as a source of new numeric metrics. Respond with raw JSON only.",
         },
         { role: "user", content: prompt },
       ],
@@ -1099,6 +1124,7 @@ export async function generateOptimizationStrategies(opts: {
   existingFilePaths: string[];
   knownDependencies: string[];
   knownEnvVars: string[];
+  mcpContext?: string;
 }): Promise<StrategyGenerationResult> {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) throw new Error("GROQ_API_KEY is not configured on the server.");
@@ -1128,6 +1154,7 @@ export async function generateOptimizationStrategies(opts: {
       opts.existingFilePaths,
       opts.knownDependencies,
       opts.knownEnvVars,
+      opts.mcpContext,
       {
         count: needed,
         alreadyAccepted: accepted.map((s) => ({

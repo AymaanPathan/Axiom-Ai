@@ -22,6 +22,7 @@ import {
   getRouteTelemetry,
   RouteTelemetry,
 } from "../services/signoz.service.js";
+import { getRouteTelemetryViaMcp } from "../services/signozMcp.service.js";
 import {
   analyzeLoadTestPerformance,
   generateOptimizationStrategies,
@@ -72,6 +73,36 @@ const router = Router();
 // How many lines of context to include above/below the target line when
 // returning a source snippet — keeps the payload small for the UI panel.
 const SOURCE_SNIPPET_CONTEXT_LINES = 15;
+
+// Best-effort fetch of the SigNoz-MCP live-traffic narrative for one route.
+// Used to enrich the AI diagnosis/strategy steps below with real-world
+// traffic context alongside the load test's own numbers. Never blocks or
+// fails the calling handler — same "enrichment, not dependency" contract
+// used everywhere else MCP touches this codebase (see
+// signozMcp.service.ts's getRouteTelemetryViaMcp / explain.service.ts).
+async function tryGetMcpContext(
+  serviceName: string,
+  method: string,
+  routePath: string,
+  windowStart: number,
+  windowEnd: number,
+): Promise<string | undefined> {
+  try {
+    return await getRouteTelemetryViaMcp(
+      serviceName,
+      method,
+      routePath,
+      windowStart,
+      windowEnd,
+    );
+  } catch (err) {
+    console.warn(
+      `[MCP] live traffic context unavailable for ${method} ${routePath}, proceeding without it:`,
+      err instanceof Error ? err.message : err,
+    );
+    return undefined;
+  }
+}
 
 // GET /repos — list the logged-in user's GitHub repos
 router.get("/", requireAuth, async (req: AuthedRequest, res) => {
@@ -824,6 +855,17 @@ router.post(
         dbBreakdown = breakdown;
       }
 
+      // Best-effort SigNoz-MCP live-traffic narrative — enrichment, not a
+      // dependency; the analysis still runs fine on undefined.
+      const serviceName = repository.githubFullName.split("/")[1];
+      const mcpContext = await tryGetMcpContext(
+        serviceName,
+        route.method,
+        route.routePath,
+        runResult.windowStart,
+        runResult.windowEnd,
+      );
+
       const report = await analyzeLoadTestPerformance({
         metadata: { method: route.method, routePath: route.routePath },
         runResult,
@@ -831,6 +873,7 @@ router.post(
         codeContext,
         dbBreakdown,
         knownFilePaths,
+        mcpContext,
       });
 
       res.json(report);
@@ -1165,6 +1208,20 @@ router.post(
         );
         dbBreakdown = breakdown;
       }
+
+      // Best-effort SigNoz-MCP live-traffic narrative — same enrichment
+      // as /analyze-performance above, so the strategy proposals also get
+      // a sense of how "hot" this route is in real traffic, not just the
+      // synthetic load-test numbers.
+      const serviceName = repository.githubFullName.split("/")[1];
+      const mcpContext = await tryGetMcpContext(
+        serviceName,
+        route.method,
+        route.routePath,
+        runResult.windowStart,
+        runResult.windowEnd,
+      );
+
       const result = await generateOptimizationStrategies({
         metadata: { method: route.method, routePath: route.routePath },
         runResult,
@@ -1175,6 +1232,7 @@ router.post(
         existingFilePaths,
         knownDependencies,
         knownEnvVars,
+        mcpContext,
       });
       res.json(result);
     } catch (err) {
