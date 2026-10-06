@@ -11,8 +11,6 @@ export const apiClient = axios.create({
 apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
-    // Centralized place to handle 401s if you later want to redirect to
-    // the GitHub connect flow automatically.
     return Promise.reject(error);
   },
 );
