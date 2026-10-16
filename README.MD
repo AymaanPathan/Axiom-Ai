@@ -178,7 +178,7 @@ cp .env.example .env   # fill in GROQ_API_KEY, GitHub OAuth creds, SigNoz endpoi
 npm run dev
 
 # Frontend
-cd client
+cd client.
 npm install
 npm run dev
 ```
