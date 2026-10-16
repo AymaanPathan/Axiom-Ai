@@ -1,3 +1,5 @@
+import { withTimeout } from "./timeoutHelper.js";
+
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 const GROQ_MODEL = "llama-3.3-70b-versatile";
 const MAX_DURATION_SECONDS = 120;
@@ -667,35 +669,39 @@ export async function generateLoadScript(opts: {
 
   let response: Response;
   try {
-    response = await fetch(GROQ_API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      signal: AbortSignal.timeout(20_000),
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are a senior performance engineer who writes production-grade k6 scripts, grounded in the real backend code you're shown — never inventing a request shape that contradicts it. JSON payloads only for methods that support a body (never for GET/DELETE/HEAD), proper auth, correct ID formats (real 24-char hex ObjectIds when the code casts to one — never crypto.randomUUID()), realistic data pools declared with `let` if later reassigned, think time, Trend metrics, thresholds (with abortOnFail object form for breakpoint tests), a try/catch-wrapped iteration body that logs its own errors, always-logged failure detail (request payload + response body + k6 network error/error_code), and a structured JSON summary. Respond with raw JavaScript only.",
+    response = await withTimeout(
+      (signal) =>
+        fetch(GROQ_API_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
           },
-          {
-            role: "user",
-            content: buildPrompt(
-              opts.metadata,
-              opts.codeContext,
-              opts.description,
-              spec,
-            ),
-          },
-        ],
-        temperature: 0.4,
-        max_tokens: 1800,
-      }),
-    });
+          signal,
+          body: JSON.stringify({
+            model: GROQ_MODEL,
+            messages: [
+              {
+                role: "system",
+                content:
+                  "You are a senior performance engineer who writes production-grade k6 scripts, grounded in the real backend code you're shown — never inventing a request shape that contradicts it. JSON payloads only for methods that support a body (never for GET/DELETE/HEAD), proper auth, correct ID formats (real 24-char hex ObjectIds when the code casts to one — never crypto.randomUUID()), realistic data pools declared with `let` if later reassigned, think time, Trend metrics, thresholds (with abortOnFail object form for breakpoint tests), a try/catch-wrapped iteration body that logs its own errors, always-logged failure detail (request payload + response body + k6 network error/error_code), and a structured JSON summary. Respond with raw JavaScript only.",
+              },
+              {
+                role: "user",
+                content: buildPrompt(
+                  opts.metadata,
+                  opts.codeContext,
+                  opts.description,
+                  spec,
+                ),
+              },
+            ],
+            temperature: 0.4,
+            max_tokens: 1800,
+          }),
+        }),
+      20_000,
+    );
   } catch (err) {
     if (err instanceof Error && err.name === "TimeoutError") {
       throw new Error(
